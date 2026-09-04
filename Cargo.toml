@@ -1,0 +1,28 @@
+[package]
+name = "wing-livetrax-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "OSC bridge between a Behringer WING console and Harrison LiveTrax 3"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+notify = "6"
+quick-xml = "0.36"
+rosc = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xmltree = { version = "0.12", features = ["attribute-order"] }
+eframe = "0.36"
+egui = "0.36"
+rfd = "0.17"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+
+[profile.release]
+lto = true
+strip = true

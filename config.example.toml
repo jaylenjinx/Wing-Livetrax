@@ -1,0 +1,195 @@
+# wing-livetrax-bridge configuration
+#
+# Every OSC address below is a knob, not a constant. The defaults are the
+# best-known values for WING firmware 2.x and Ardour-family OSC, but WING's
+# node tree has moved between firmware revisions - confirm yours with:
+#
+#   wing-livetrax-bridge probe --target wing
+#   wing-livetrax-bridge learn
+#
+# ---------------------------------------------------------------- console ---
+[wing]
+host = "192.168.1.20"        # console IP (Setup > Network on the WING)
+port = 2223                  # WING OSC port
+local_port = 0               # 0 = ephemeral; set a fixed port if you firewall it
+channels = 40                # how many input channels to mirror
+
+# Address of a channel's name. {ch} is the 1-based channel number.
+# If `probe` shows something else (e.g. "/ch/{ch}/$name"), change it here.
+name_address = "/ch/{ch}/name"
+
+# Sent every `subscribe_interval_ms` so the console keeps pushing changes.
+# If your firmware uses a different keep-alive, put it here - several may be
+# listed and all will be sent.
+subscribe = ["/*S"]
+subscribe_interval_ms = 5000
+
+# Belt-and-braces: re-read every mirrored name on this interval, in case the
+# subscription is not delivering name changes. 0 disables polling.
+name_poll_interval_ms = 10000
+query_with_empty_args = true # WING/X32 convention: no args = "tell me the value"
+
+# -------------------------------------------------------------- LiveTrax ---
+[livetrax]
+host = "127.0.0.1"           # 127.0.0.1 when the bridge runs on the LiveTrax PC
+port = 3819                  # LiveTrax/Ardour OSC port
+local_port = 3820            # fixed local port keeps firewall rules simple
+
+# /set_surface parameters.
+bank_size = 0                # 0 = one bank with every strip in it
+strip_types = 3              # 1 audio tracks | 2 midi tracks | 4 audio busses
+                             # | 8 midi busses | 16 VCAs | 32 master | 64 monitor
+feedback = 1099              # 1 buttons | 2 controls | 8 heartbeat | 64 timecode
+                             # | 1024 playhead in samples  (1+2+8+64+1024)
+gain_mode = 0
+refresh_interval_ms = 10000  # re-announce the surface, re-request the strip list
+
+# How a track is renamed. With {ssid} the id goes in the path; without it the
+# id is sent as the first argument.
+rename_address = "/strip/name"
+
+# Marker creation at the playhead.
+add_marker_address = "/add_marker"
+add_marker_takes_name = false   # set true if your build accepts /add_marker "name"
+
+# Marker positions are read from the session file - LiveTrax does not publish
+# the location list over OSC. Point this at the .ardour file or its folder.
+session_file = "/Users/you/LiveTrax/MyShow/MyShow.ardour"
+watch_session_file = true
+sample_rate = 48000          # fallback only; the real rate is read from the session
+
+# ------------------------------------------------------------ name sync ----
+[names]
+enabled = true
+direction = "wing-to-daw"    # wing-to-daw | daw-to-wing | bidirectional
+debounce_ms = 300            # wait for typing to settle before pushing
+max_len_wing = 12            # truncate names pushed to the scribble strips
+skip_empty = true
+ignore_prefixes = ["Audio ", "MIDI ", "Ch ", "CH"]   # treated as "unnamed"
+daw_prefix = ""
+daw_suffix = ""
+
+# ------------------------------------------------- recorded output patch ---
+# The console records through one port group, and that group's output patch
+# decides which source lands on which DAW track - it is rarely channel 1 to
+# track 1. Point this at a .snap saved from the console and the mapping follows
+# the desk's own patching. Run `wing-livetrax-bridge snap-info <file>` to see
+# the groups, and `--output USB` to see how one resolves.
+[patch]
+source = "snap"              # snap = read a .snap file | console = ask the desk
+# snap_file = "/Volumes/CONSOLES/WING/MYSHOW.snap"
+output_group = "USB"         # USB | CRD | A | B | C | SC | MOD | REC | AES | LCL
+use_for_map = true           # build the channel <-> strip map from the patch
+query_on_start = true        # with source = "console", ask as soon as we connect
+
+# Addresses used to read the patch from a running console. A .snap is the node
+# tree as JSON, so the OSC paths are the same with "ae_data." dropped - which is
+# why ae_data.ch.1.name is the already-known /ch/1/name. Confirm with `probe`.
+[patch.live]
+out_source_group = "/io/out/{grp}/{n}/grp"
+out_source_index = "/io/out/{grp}/{n}/in"
+channel_input_group = "/ch/{ch}/in/conn/grp"
+channel_input_index = "/ch/{ch}/in/conn/in"
+object_name = "/{sect}/{n}/name"
+input_name = "/io/in/{grp}/{n}/name"
+settle_ms = 1500             # how long to collect replies before mapping
+
+# Outputs per port group, so the bridge knows how many to ask about.
+[patch.live.group_sizes]
+LCL = 8
+AUX = 8
+A = 48
+B = 48
+C = 48
+SC = 32
+USB = 48
+CRD = 64
+MOD = 64
+REC = 4
+AES = 2
+
+# ------------------------------------------------------- channel mapping ---
+# Used when no patch is loaded, or when patch.use_for_map is false.
+[map]
+one_to_one = true            # wing channel N -> strip N + strip_offset
+strip_offset = 0
+# Overrides / manual pairs:
+# pairs = [ { channel = 33, strip = 41 }, { channel = 34, strip = 42 } ]
+
+# ------------------------------------------------- transport and record ----
+[transport]
+enabled = true
+
+# Console control -> DAW action. Get these addresses from `learn`: assign a
+# USER button on the WING, press it, and paste what is printed.
+# Actions: play, stop, toggle_play, record_arm_toggle, record_start,
+#          goto_start, goto_end, next_marker, prev_marker, add_marker,
+#          { locate_marker = "Song 3" }, { access_action = "Transport/Record" },
+#          { osc = { address = "/toggle_punch_in", args = [1] } }
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/1"
+action = "toggle_play"
+
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/2"
+action = "record_arm_toggle"
+
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/3"
+action = "add_marker"
+
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/4"
+action = "goto_start"
+
+# DAW state -> console feedback (button LED colour, indicator, etc.)
+# [[transport.leds]]
+# source = "playing"          # playing | recording | stopped
+# address = "/$ctl/user/1/bu/1/led"
+# on = 1
+# off = 0
+
+# Console control -> per-track record arm.
+# [[transport.rec_arm]]
+# address = "/$ctl/user/2/bu/1"
+# channel = 1                 # resolved through [map]; or set strip = 1 directly
+# follow_value = true         # latch to the sent value instead of toggling
+
+# ------------------------------------------------- scenes <-> markers ------
+[scenes]
+enabled = false
+direction = "scene-to-marker"   # scene-to-marker | marker-to-scene | bidirectional
+
+# Console address that reports the active scene/snapshot index. Confirm with
+# `learn`: recall a scene and paste the address it prints.
+scene_address = "/$ctl/lib/$actidx"
+# Address used to recall a scene on the console (marker -> scene direction).
+recall_address = "/$ctl/lib/$action"
+
+locate_and_play = false         # roll the transport after locating
+add_marker_while_rolling = true # recalling a scene mid-take drops a named marker
+                                # instead of jumping the playhead
+retrigger_same_scene = false    # act again when the console re-reports the scene
+                                # that is already active. Off by default: consoles
+                                # re-send current values on subscription refresh.
+retrigger_guard_ms = 2000       # when the above is on, ignore repeats this close together
+
+map = [
+  { scene = 1, marker = "Song 1" },
+  { scene = 2, marker = "Song 2" },
+  { scene = 3, marker = "Song 3" },
+]
+
+# ---------------------------------------------- offline WING snapshot ------
+[snapshot]
+# Line written per channel. {path} is the channel's name address, {name} the
+# quoted name, {raw} the unquoted one, {ch} the channel number.
+line = "{path} {name}"
+
+# Address forms looked for when rewriting a snapshot exported from the console.
+# wing.name_address is always tried as well.
+name_paths = ["/ch/{ch}/name", "ch.{ch}/name", "/ch.{ch}/name"]
+
+include_comments = true   # write a "#" header into node-text files
+first_channel = 1         # console channel the session's first track maps to
+include_busses = false    # busses as well as tracks
