@@ -33,9 +33,10 @@ use crate::wing::Wing;
 #[derive(Parser, Debug)]
 #[command(name = "wing-livetrax-bridge", version, about, long_about = None)]
 struct Cli {
-    /// Path to the TOML configuration.
-    #[arg(short, long, default_value = "config.toml", global = true)]
-    config: PathBuf,
+    /// Path to the TOML configuration. Defaults to ./config.toml when there is
+    /// one, otherwise the per-user copy in Application Support.
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
     /// Log every OSC message in both directions.
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -214,22 +215,30 @@ fn main() -> Result<()> {
         .with_writer(log.clone().and(std::io::stdout))
         .init();
 
+    let config_path = match resolve_config(cli.config) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
     match cli.cmd.unwrap_or(Cmd::Gui { tab: None, position: None }) {
         Cmd::Init { output } => cmd_init(&output),
-        Cmd::Markers => cmd_markers(&cli.config),
+        Cmd::Markers => cmd_markers(&config_path),
         Cmd::SnapInfo { file, output } => cmd_snap_info(&file, output.as_deref()),
         Cmd::Patch { output, seconds, groups } => {
-            block_on(cmd_patch(&cli.config, output, seconds, groups))
+            block_on(cmd_patch(&config_path, output, seconds, groups))
         }
-        Cmd::Gui { tab, position } => cmd_gui(&cli.config, log, tab.as_deref(), position.as_deref()),
-        Cmd::Run => block_on(cmd_run(&cli.config)),
+        Cmd::Gui { tab, position } => cmd_gui(&config_path, log, tab.as_deref(), position.as_deref()),
+        Cmd::Run => block_on(cmd_run(&config_path)),
         Cmd::Probe { target, seconds, filter } => {
-            block_on(cmd_probe(&cli.config, target, seconds, filter))
+            block_on(cmd_probe(&config_path, target, seconds, filter))
         }
-        Cmd::Learn { seconds } => block_on(cmd_learn(&cli.config, seconds)),
-        Cmd::Strips { seconds } => block_on(cmd_strips(&cli.config, seconds)),
+        Cmd::Learn { seconds } => block_on(cmd_learn(&config_path, seconds)),
+        Cmd::Strips { seconds } => block_on(cmd_strips(&config_path, seconds)),
         Cmd::Send { target, address, args } => {
-            block_on(cmd_send(&cli.config, target, &address, &args))
+            block_on(cmd_send(&config_path, target, &address, &args))
         }
         Cmd::WingSnapshot {
             session,
@@ -241,7 +250,7 @@ fn main() -> Result<()> {
             include_busses,
             apply,
         } => block_on(cmd_wing_snapshot(
-            &cli.config,
+            &config_path,
             WingSnapshotArgs {
                 session,
                 out,
@@ -267,7 +276,7 @@ fn main() -> Result<()> {
             allow_minimal,
             wait_secs,
         } => block_on(cmd_new_session(
-            &cli.config,
+            &config_path,
             NewSessionArgs {
                 dest,
                 name,
@@ -284,6 +293,43 @@ fn main() -> Result<()> {
             },
         )),
     }
+}
+
+/// Where the configuration lives.
+///
+/// A path on the command line always wins. Otherwise a `config.toml` beside the
+/// working directory is used when there is one - the way the CLI is usually run
+/// - and failing that the per-user copy, which is created from the bundled
+/// example the first time the app is opened.
+fn resolve_config(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let local = PathBuf::from("config.toml");
+    if local.is_file() {
+        return Ok(local);
+    }
+    let path = user_config_path()?;
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::write(&path, include_str!("../config.example.toml"))
+            .with_context(|| format!("writing {}", path.display()))?;
+        eprintln!("Wrote a starter configuration to {}", path.display());
+    }
+    Ok(path)
+}
+
+fn user_config_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("no HOME in the environment")?;
+    let dir = if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library/Application Support/WING LiveTrax Bridge")
+    } else {
+        PathBuf::from(home).join(".config/wing-livetrax-bridge")
+    };
+    Ok(dir.join("config.toml"))
 }
 
 /// Each subcommand gets its own runtime; the GUI needs the main thread.
