@@ -14,10 +14,7 @@ use crate::snapfile::SnapFile;
 use crate::snapshot::{self, SnapshotRequest};
 use crate::shared::{Command, CommandTx, LogBuffer, Shared, Snapshot};
 
-const GREEN: egui::Color32 = egui::Color32::from_rgb(70, 180, 100);
-const RED: egui::Color32 = egui::Color32::from_rgb(210, 90, 80);
-const AMBER: egui::Color32 = egui::Color32::from_rgb(220, 170, 60);
-const DIM: egui::Color32 = egui::Color32::from_rgb(140, 140, 150);
+use crate::theme::{self, ACCENT, AMBER, DIM, GREEN, RED, TEXT};
 
 pub fn run(
     shared: Shared,
@@ -44,7 +41,10 @@ pub fn run(
     eframe::run_native(
         "WING <-> LiveTrax Bridge",
         options,
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("GUI: {e}"))
 }
@@ -261,14 +261,14 @@ impl App {
     /// track N carries whatever the console sends on output N.
     fn planned_tracks(&self) -> Vec<String> {
         let mut raw = Vec::new();
-        let use_patch = self.form.use_patch && !self.snap.patch_names.is_empty();
+        let use_patch = self.form.use_patch && !self.snap.patch_slots.is_empty();
         for slot in self.form.first_ch..=self.form.last_ch.max(self.form.first_ch) {
             let name = if use_patch {
                 self.snap
-                    .patch_names
+                    .patch_slots
                     .iter()
-                    .find(|(out, _)| *out == slot)
-                    .map(|(_, name)| name.clone())
+                    .find(|s| s.output == slot)
+                    .map(|s| s.name.clone())
                     .unwrap_or_default()
             } else {
                 self.snap.wing_names.get(&slot).cloned().unwrap_or_default()
@@ -291,51 +291,52 @@ impl eframe::App for App {
             self.snap = s.clone();
         }
 
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-        egui::Panel::bottom("bottom").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.small(format!(
-                    "console {} | daw {} | {} msgs in",
-                    self.snap.wing_target,
-                    self.snap.daw_target,
-                    self.snap.wing_msgs + self.snap.daw_msgs
-                ));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(format!("config: {}", self.cfg_path.display()));
-                });
+        egui::Panel::top("header")
+            .frame(bar_frame())
+            .show(ui, |ui| self.header(ui));
+        egui::Panel::top("tabs")
+            .frame(tabs_frame())
+            .show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::bottom("status")
+            .frame(bar_frame())
+            .show(ui, |ui| self.status_bar(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| match self.tab {
+                        Tab::Channels => self.channels_tab(ui),
+                        Tab::Transport => self.transport_tab(ui),
+                        Tab::Scenes => self.scenes_tab(ui),
+                        Tab::NewSession => self.session_tab(ui),
+                        Tab::Snapshot => self.snapshot_tab(ui),
+                        Tab::Log => self.log_tab(ui),
+                        Tab::Settings => self.settings_tab(ui),
+                    });
             });
-        });
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Channels => self.channels_tab(ui),
-            Tab::Transport => self.transport_tab(ui),
-            Tab::Scenes => self.scenes_tab(ui),
-            Tab::NewSession => self.session_tab(ui),
-            Tab::Snapshot => self.snapshot_tab(ui),
-            Tab::Log => self.log_tab(ui),
-            Tab::Settings => self.settings_tab(ui),
-        });
     }
 }
 
-// ------------------------------------------------------------------ views ---
+// ------------------------------------------------------------ chrome -------
 
 impl App {
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
+    fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            link_pill(ui, "WING", self.snap.last_wing_rx);
-            ui.add_space(8.0);
-            link_pill(ui, "LiveTrax", self.snap.last_daw_rx);
-            ui.separator();
+            theme::pill(ui, link_color(self.snap.last_wing_rx), "WING", &age(self.snap.last_wing_rx));
+            theme::pill(
+                ui,
+                link_color(self.snap.last_daw_rx),
+                "LiveTrax",
+                &age(self.snap.last_daw_rx),
+            );
+            ui.add_space(6.0);
 
-            if ui.button(if self.snap.playing { "\u{23F8} Stop" } else { "\u{25B6} Play" }).clicked() {
-                self.send(Command::Transport(if self.snap.playing {
-                    Action::Stop
-                } else {
-                    Action::Play
-                }));
+            let rolling = self.snap.playing;
+            if ui.add(theme::primary(if rolling { "Stop" } else { "Play" })).clicked() {
+                self.send(Command::Transport(if rolling { Action::Stop } else { Action::Play }));
             }
-            dot(ui, if self.snap.recording { RED } else { DIM });
+            theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
             if ui.button("Rec arm").clicked() {
                 self.send(Command::Transport(Action::RecordArmToggle));
             }
@@ -345,17 +346,27 @@ impl App {
             if ui.button("Marker +").clicked() {
                 self.send(Command::Transport(Action::AddMarker));
             }
-            ui.separator();
-            ui.monospace(timecode(self.snap.position, self.snap.sample_rate));
-            if let Some(m) = &self.snap.current_marker {
-                ui.label(egui::RichText::new(format!("\u{2691} {m}")).color(DIM));
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(timecode(self.snap.position, self.snap.sample_rate))
+                    .monospace()
+                    .size(15.0)
+                    .color(if rolling { GREEN } else { TEXT }),
+            );
+
+            if let Some(marker) = self.snap.current_marker.clone() {
+                chip(ui, &format!("marker  {marker}"));
             }
-            if let Some(s) = self.snap.current_scene {
-                ui.label(egui::RichText::new(format!("scene {s}")).color(DIM));
+            if let Some(scene) = self.snap.current_scene {
+                chip(ui, &format!("scene  {scene}"));
             }
         });
-        ui.add_space(4.0);
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
             for (tab, label) in [
                 (Tab::Channels, "Channels"),
                 (Tab::Transport, "Transport"),
@@ -365,64 +376,110 @@ impl App {
                 (Tab::Log, "Log"),
                 (Tab::Settings, "Settings"),
             ] {
-                ui.selectable_value(&mut self.tab, tab, label);
+                let selected = self.tab == tab;
+                let text = egui::RichText::new(label).color(if selected { TEXT } else { DIM });
+                if ui.selectable_label(selected, text).clicked() {
+                    self.tab = tab;
+                }
             }
         });
-        ui.add_space(2.0);
     }
 
-    fn channels_tab(&mut self, ui: &mut egui::Ui) {
-        self.patch_selector(ui);
-        ui.separator();
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Read names from console").clicked() {
-                self.send(Command::QueryWingNames);
-            }
-            if ui.button("Push console -> DAW").clicked() {
-                self.send(Command::PushNamesToDaw);
-            }
-            if ui.button("Push DAW -> console").clicked() {
-                self.send(Command::PushNamesToWing);
-            }
-            if ui.button("Refresh strip list").clicked() {
-                self.send(Command::RefreshDaw);
-            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "console {}   daw {}   {} messages in",
+                    self.snap.wing_target,
+                    self.snap.daw_target,
+                    self.snap.wing_msgs + self.snap.daw_msgs
+                ))
+                .small()
+                .color(DIM),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(self.cfg_path.display().to_string())
+                        .small()
+                        .color(DIM),
+                );
+            });
         });
-        ui.separator();
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+    }
+}
+
+// ------------------------------------------------------------- tabs --------
+
+impl App {
+    fn channels_tab(&mut self, ui: &mut egui::Ui) {
+        theme::titled_card(ui, "RECORDED OUTPUT", |ui| self.patch_selector(ui));
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, "CHANNEL NAMES", |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Read names from console").clicked() {
+                    self.send(Command::QueryWingNames);
+                }
+                if ui.button("Push console -> DAW").clicked() {
+                    self.send(Command::PushNamesToDaw);
+                }
+                if ui.button("Push DAW -> console").clicked() {
+                    self.send(Command::PushNamesToWing);
+                }
+                if ui.button("Refresh strip list").clicked() {
+                    self.send(Command::RefreshDaw);
+                }
+            });
+            ui.add_space(6.0);
+
+            if self.snap.pairs.is_empty() {
+                theme::empty(ui, "No channel map yet - load an output patch, or set [map] in the config.");
+                return;
+            }
+            let patched = !self.snap.patch_slots.is_empty();
             egui::Grid::new("channels")
-                .num_columns(5)
+                .num_columns(if patched { 6 } else { 5 })
                 .striped(true)
-                .spacing([14.0, 4.0])
+                .spacing([12.0, 5.0])
                 .show(ui, |ui| {
-                    ui.strong("Ch");
-                    ui.strong("Console name");
-                    ui.strong("Strip");
-                    ui.strong("LiveTrax name");
-                    ui.strong("");
+                    theme::column(ui, "CH");
+                    theme::column(ui, "CONSOLE NAME");
+                    if patched {
+                        theme::column(ui, "PATCHED FROM");
+                    }
+                    theme::column(ui, "STRIP");
+                    theme::column(ui, "LIVETRAX NAME");
+                    theme::column(ui, "");
                     ui.end_row();
 
                     for (ch, ssid) in &self.snap.pairs {
                         let wing = self.snap.wing_names.get(ch).cloned().unwrap_or_default();
                         let daw = self.snap.strips.get(ssid).cloned().unwrap_or_default();
-                        ui.monospace(ch.to_string());
-                        ui.label(&wing);
-                        ui.monospace(ssid.to_string());
-                        ui.label(&daw);
+                        theme::num(ui, ch.to_string());
+                        cell(ui, 150.0, egui::RichText::new(&wing).color(TEXT));
+                        if patched {
+                            let source = self
+                                .snap
+                                .patch_slots
+                                .iter()
+                                .find(|s| s.channel == Some(*ch))
+                                .map(|s| s.source.clone())
+                                .unwrap_or_default();
+                            cell(ui, 90.0, egui::RichText::new(source).color(DIM).monospace());
+                        }
+                        theme::num(ui, ssid.to_string());
+                        cell(ui, 150.0, egui::RichText::new(&daw).color(TEXT));
                         let (mark, color) = if wing.is_empty() && daw.is_empty() {
                             ("", DIM)
                         } else if !wing.is_empty() && wing == daw {
                             ("=", GREEN)
                         } else {
-                            ("\u{2260}", AMBER)
+                            ("!=", AMBER)
                         };
-                        ui.label(egui::RichText::new(mark).color(color));
+                        ui.label(egui::RichText::new(mark).color(color).monospace());
                         ui.end_row();
                     }
                 });
-            if self.snap.pairs.is_empty() {
-                ui.label("No channel map yet - check [map] in the config.");
-            }
         });
     }
 
@@ -431,10 +488,10 @@ impl App {
     fn patch_selector(&mut self, ui: &mut egui::Ui) {
         let live = self.patch_form.source == PatchSource::Console;
         ui.horizontal(|ui| {
-            ui.strong("Names follow output:");
+            theme::field(ui, "Read the patch");
             for (value, label) in [
-                (PatchSource::Snap, "from .snap"),
-                (PatchSource::Console, "from console"),
+                (PatchSource::Snap, "from a .snap"),
+                (PatchSource::Console, "from the console"),
             ] {
                 let picked = self.patch_form.source == value;
                 if ui.selectable_label(picked, label).clicked() && !picked {
@@ -447,22 +504,21 @@ impl App {
                     }
                 }
             }
-            ui.separator();
+        });
 
-            if live {
+        if live {
+            ui.horizontal(|ui| {
+                theme::field(ui, "Output group");
                 let label = self.patch_form.group.clone();
                 egui::ComboBox::from_id_salt("live_group")
                     .selected_text(label)
-                    .width(220.0)
+                    .width(240.0)
                     .show_ui(ui, |ui| {
                         let groups = self.patch_form.live_groups.clone();
                         for id in groups {
                             let picked = self.patch_form.group == id;
-                            if ui
-                                .selectable_label(picked, format!("{:<4} {}", id, crate::patch::group_label(&id)))
-                                .clicked()
-                                && !picked
-                            {
+                            let text = format!("{:<4} {}", id, crate::patch::group_label(&id));
+                            if ui.selectable_label(picked, text).clicked() && !picked {
                                 self.patch_form.group = id;
                                 self.query_console_patch();
                             }
@@ -479,9 +535,12 @@ impl App {
                 {
                     ui.spinner();
                 }
-            } else {
-                ui.add(egui::TextEdit::singleline(&mut self.patch_form.file).desired_width(300.0));
-                if ui.button("Browse\u{2026}").clicked() {
+            });
+        } else {
+            ui.horizontal(|ui| {
+                theme::field(ui, "Snapshot file");
+                ui.add(egui::TextEdit::singleline(&mut self.patch_form.file).desired_width(330.0));
+                if ui.button("Browse").clicked() {
                     if let Some(file) = rfd::FileDialog::new()
                         .add_filter("WING snapshot", &["snap"])
                         .pick_file()
@@ -491,38 +550,6 @@ impl App {
                         self.apply_patch();
                     }
                 }
-                let current = self
-                    .patch_form
-                    .groups
-                    .iter()
-                    .find(|g| g.id == self.patch_form.group);
-                let label = match current {
-                    Some(g) => format!("{} ({})", g.id, g.patched),
-                    None => self.patch_form.group.clone(),
-                };
-                let enabled = !self.patch_form.groups.is_empty();
-                ui.add_enabled_ui(enabled, |ui| {
-                    egui::ComboBox::from_id_salt("output_group")
-                        .selected_text(label)
-                        .width(200.0)
-                        .show_ui(ui, |ui| {
-                            let groups = self.patch_form.groups.clone();
-                            for group in groups {
-                                let picked = self.patch_form.group == group.id;
-                                if ui
-                                    .selectable_label(
-                                        picked,
-                                        format!("{:<4} {}", group.id, group.summary()),
-                                    )
-                                    .clicked()
-                                    && !picked
-                                {
-                                    self.patch_form.group = group.id.clone();
-                                    self.apply_patch();
-                                }
-                            }
-                        });
-                });
                 if ui.button("Reload").clicked() {
                     self.patch_form.reload();
                     self.apply_patch();
@@ -532,29 +559,70 @@ impl App {
                     self.patch_form.reload();
                     self.apply_patch();
                 }
-            }
-        });
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "Output group");
+                let current = self
+                    .patch_form
+                    .groups
+                    .iter()
+                    .find(|g| g.id == self.patch_form.group);
+                let label = match current {
+                    Some(g) => format!("{}  ({} patched)", g.id, g.patched),
+                    None => self.patch_form.group.clone(),
+                };
+                let enabled = !self.patch_form.groups.is_empty();
+                ui.add_enabled_ui(enabled, |ui| {
+                    egui::ComboBox::from_id_salt("output_group")
+                        .selected_text(label)
+                        .width(240.0)
+                        .show_ui(ui, |ui| {
+                            let groups = self.patch_form.groups.clone();
+                            for group in groups {
+                                let picked = self.patch_form.group == group.id;
+                                let text = format!("{:<4} {}", group.id, group.summary());
+                                if ui.selectable_label(picked, text).clicked() && !picked {
+                                    self.patch_form.group = group.id.clone();
+                                    self.apply_patch();
+                                }
+                            }
+                        });
+                });
+            });
+        }
 
+        ui.add_space(2.0);
         if let Some(err) = &self.patch_form.error {
-            ui.colored_label(RED, format!("error: {err}"));
+            ui.label(egui::RichText::new(format!("error: {err}")).color(RED).small());
         } else if let Some(summary) = &self.snap.patch_summary {
             let extra = if live {
                 String::new()
             } else {
-                format!("; {} named channels in the snapshot", self.patch_form.channel_names)
+                format!("; {} named channels", self.patch_form.channel_names)
             };
-            ui.small(format!(
-                "{summary}{extra}. DAW strip N is output N of this group."
-            ));
+            ui.label(
+                egui::RichText::new(format!(
+                    "{summary}{extra}. DAW strip N is output N of this group."
+                ))
+                .color(DIM)
+                .small(),
+            );
         } else if live {
-            ui.small(
-                "Waiting for the console. If nothing arrives, check wing.host and the \
-                 [patch.live] addresses - `probe --target wing` shows what it really sends.",
+            ui.label(
+                egui::RichText::new(
+                    "Waiting for the console. If nothing arrives, check wing.host and the \
+                     [patch.live] addresses - `probe --target wing` shows what it really sends.",
+                )
+                .color(AMBER)
+                .small(),
             );
         } else {
-            ui.small(
-                "No output patch loaded - strips are mapped straight from channel numbers. \
-                 Load a .snap saved from the console, or read the patch from the console itself.",
+            ui.label(
+                egui::RichText::new(
+                    "No patch loaded - strips are mapped straight from channel numbers.",
+                )
+                .color(DIM)
+                .small(),
             );
         }
     }
@@ -575,144 +643,195 @@ impl App {
     }
 
     fn transport_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Transport");
-        ui.horizontal_wrapped(|ui| {
-            for (label, action) in [
-                ("Play", Action::Play),
-                ("Stop", Action::Stop),
-                ("Toggle roll", Action::TogglePlay),
-                ("Record arm", Action::RecordArmToggle),
-                ("Record + roll", Action::RecordStart),
-                ("Go to start", Action::GotoStart),
-                ("Go to end", Action::GotoEnd),
-                ("Previous marker", Action::PrevMarker),
-                ("Next marker", Action::NextMarker),
-                ("Drop marker", Action::AddMarker),
-            ] {
-                if ui.button(label).clicked() {
-                    self.send(Command::Transport(action.clone()));
-                }
-            }
-        });
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Position:");
-            ui.monospace(timecode(self.snap.position, self.snap.sample_rate));
-            ui.label(format!("({} samples @ {} Hz)", self.snap.position, self.snap.sample_rate));
-        });
-        ui.horizontal(|ui| {
-            ui.label("State:");
-            ui.colored_label(
-                if self.snap.playing { GREEN } else { DIM },
-                if self.snap.playing { "rolling" } else { "stopped" },
-            );
-            ui.colored_label(
-                if self.snap.recording { RED } else { DIM },
-                if self.snap.recording { "record armed" } else { "not armed" },
-            );
-        });
-    }
-
-    fn scenes_tab(&mut self, ui: &mut egui::Ui) {
-        let mut scenes_enabled = self.snap.scenes_enabled;
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut scenes_enabled, "Scene linking enabled").changed() {
-                self.send(Command::SetScenesEnabled(scenes_enabled));
-            }
-            if ui.button("Reload session file").clicked() {
-                self.send(Command::ReloadSession);
-            }
-        });
-        ui.small(match &self.snap.session_file {
-            Some(p) => format!("markers from {}", p.display()),
-            None => "no session file configured - marker positions are unknown".into(),
-        });
-        ui.separator();
-
-        ui.strong("Scene <-> marker map");
-        egui::Grid::new("scenes").num_columns(4).striped(true).show(ui, |ui| {
-            for (scene, marker) in &self.snap.scene_map {
-                let known = self
-                    .snap
-                    .markers
-                    .iter()
-                    .any(|(n, _)| n.eq_ignore_ascii_case(marker));
-                ui.monospace(format!("scene {scene}"));
-                ui.label(marker);
-                ui.colored_label(
-                    if known { GREEN } else { AMBER },
-                    if known { "marker found" } else { "marker missing" },
+        theme::titled_card(ui, "STATE", |ui| {
+            ui.horizontal(|ui| {
+                theme::dot(ui, if self.snap.playing { GREEN } else { theme::LINE });
+                ui.label(if self.snap.playing { "rolling" } else { "stopped" });
+                ui.add_space(10.0);
+                theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
+                ui.label(if self.snap.recording { "record armed" } else { "not armed" });
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new(timecode(self.snap.position, self.snap.sample_rate))
+                        .monospace()
+                        .size(15.0),
                 );
-                ui.horizontal(|ui| {
-                    if ui.small_button("Recall on console").clicked() {
-                        self.send(Command::RecallScene(*scene));
-                    }
-                    if known && ui.small_button("Locate DAW").clicked() {
-                        self.send(Command::LocateMarker(marker.clone()));
-                    }
-                });
-                ui.end_row();
-            }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} samples @ {} Hz",
+                        self.snap.position, self.snap.sample_rate
+                    ))
+                    .small()
+                    .color(DIM),
+                );
+            });
         });
-        if self.snap.scene_map.is_empty() {
-            ui.label("No scene map - add entries under [scenes] in the config.");
-        }
+        ui.add_space(10.0);
 
-        ui.add_space(8.0);
-        ui.strong(format!("Markers ({})", self.snap.markers.len()));
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            egui::Grid::new("markers").num_columns(3).striped(true).show(ui, |ui| {
-                for (name, pos) in &self.snap.markers {
-                    ui.label(name);
-                    ui.monospace(timecode(*pos, self.snap.sample_rate));
-                    if ui.small_button("Locate").clicked() {
-                        self.send(Command::LocateMarker(name.clone()));
+        theme::titled_card(ui, "SEND TO LIVETRAX", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (label, action) in [
+                    ("Play", Action::Play),
+                    ("Stop", Action::Stop),
+                    ("Toggle roll", Action::TogglePlay),
+                    ("Record arm", Action::RecordArmToggle),
+                    ("Record + roll", Action::RecordStart),
+                    ("Go to start", Action::GotoStart),
+                    ("Go to end", Action::GotoEnd),
+                    ("Previous marker", Action::PrevMarker),
+                    ("Next marker", Action::NextMarker),
+                    ("Drop marker", Action::AddMarker),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.send(Command::Transport(action.clone()));
                     }
-                    ui.end_row();
                 }
             });
         });
     }
 
-    fn session_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Create a LiveTrax session from the console");
-        ui.small(
-            "Builds a new session folder whose tracks are named after the WING channels. \
-             A track from the template session is cloned per channel, so the route graph \
-             matches whatever your LiveTrax version writes.",
-        );
-        ui.separator();
-
-        egui::Grid::new("session_form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            ui.label("Destination folder");
+    fn scenes_tab(&mut self, ui: &mut egui::Ui) {
+        theme::titled_card(ui, "SCENE LINKING", |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.form.parent_dir).desired_width(420.0));
-                if ui.button("Browse\u{2026}").clicked() {
+                let mut enabled = self.snap.scenes_enabled;
+                if ui.checkbox(&mut enabled, "Enabled").changed() {
+                    self.send(Command::SetScenesEnabled(enabled));
+                }
+                if ui.button("Reload session file").clicked() {
+                    self.send(Command::ReloadSession);
+                }
+            });
+            ui.label(
+                egui::RichText::new(match &self.snap.session_file {
+                    Some(p) => format!("markers from {}", p.display()),
+                    None => "no session file configured - marker positions are unknown".into(),
+                })
+                .small()
+                .color(DIM),
+            );
+        });
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, "SCENE <-> MARKER MAP", |ui| {
+            if self.snap.scene_map.is_empty() {
+                theme::empty(ui, "No scene map - add entries under [scenes] in the config.");
+                return;
+            }
+            egui::Grid::new("scenes").num_columns(4).striped(true).spacing([12.0, 5.0]).show(
+                ui,
+                |ui| {
+                    theme::column(ui, "SCENE");
+                    theme::column(ui, "MARKER");
+                    theme::column(ui, "");
+                    theme::column(ui, "");
+                    ui.end_row();
+                    for (scene, marker) in &self.snap.scene_map {
+                        let known = self
+                            .snap
+                            .markers
+                            .iter()
+                            .any(|(n, _)| n.eq_ignore_ascii_case(marker));
+                        theme::num(ui, scene.to_string());
+                        cell(ui, 160.0, egui::RichText::new(marker).color(TEXT));
+                        ui.label(
+                            egui::RichText::new(if known { "marker found" } else { "not in session" })
+                                .small()
+                                .color(if known { GREEN } else { AMBER }),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Recall on console").clicked() {
+                                self.send(Command::RecallScene(*scene));
+                            }
+                            if known && ui.small_button("Locate DAW").clicked() {
+                                self.send(Command::LocateMarker(marker.clone()));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                },
+            );
+        });
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, &format!("MARKERS ({})", self.snap.markers.len()), |ui| {
+            if self.snap.markers.is_empty() {
+                theme::empty(ui, "No markers - point at a saved session, or drop one from the header.");
+                return;
+            }
+            egui::Grid::new("markers").num_columns(3).striped(true).spacing([12.0, 5.0]).show(
+                ui,
+                |ui| {
+                    for (name, pos) in &self.snap.markers {
+                        cell(ui, 200.0, egui::RichText::new(name).color(TEXT));
+                        theme::num(ui, timecode(*pos, self.snap.sample_rate));
+                        if ui.small_button("Locate").clicked() {
+                            self.send(Command::LocateMarker(name.clone()));
+                        }
+                        ui.end_row();
+                    }
+                },
+            );
+        });
+    }
+
+    fn session_tab(&mut self, ui: &mut egui::Ui) {
+        let patched = !self.snap.patch_slots.is_empty();
+        theme::titled_card(ui, "TRACK NAMES FROM", |ui| {
+            ui.horizontal(|ui| {
+                theme::field(ui, if patched && self.form.use_patch { "Outputs" } else { "Channels" });
+                let max_ch = self.cfg.wing.channels.max(1);
+                ui.add(egui::DragValue::new(&mut self.form.first_ch).range(1..=max_ch));
+                ui.label(egui::RichText::new("to").color(DIM));
+                ui.add(egui::DragValue::new(&mut self.form.last_ch).range(1..=max_ch));
+                ui.add_space(8.0);
+                ui.checkbox(&mut self.form.include_unnamed, "include unnamed");
+                ui.add_enabled_ui(patched, |ui| {
+                    ui.checkbox(&mut self.form.use_patch, "follow the output patch");
+                });
+            });
+            if patched && self.form.use_patch {
+                if let Some(summary) = &self.snap.patch_summary {
+                    ui.label(egui::RichText::new(summary).small().color(DIM));
+                }
+            } else if !patched {
+                ui.label(
+                    egui::RichText::new("No patch loaded, so tracks follow console channel order.")
+                        .small()
+                        .color(DIM),
+                );
+            }
+        });
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, "NEW SESSION", |ui| {
+            ui.horizontal(|ui| {
+                theme::field(ui, "Destination folder");
+                ui.add(egui::TextEdit::singleline(&mut self.form.parent_dir).desired_width(360.0));
+                if ui.button("Browse").clicked() {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.form.parent_dir = dir.display().to_string();
                     }
                 }
             });
-            ui.end_row();
-
-            ui.label("Session name");
-            ui.add(egui::TextEdit::singleline(&mut self.form.name).desired_width(420.0));
-            ui.end_row();
-
-            ui.label("Sample rate");
-            egui::ComboBox::from_id_salt("rate")
-                .selected_text(format!("{} Hz", self.form.sample_rate))
-                .show_ui(ui, |ui| {
-                    for rate in [44_100u32, 48_000, 88_200, 96_000] {
-                        ui.selectable_value(&mut self.form.sample_rate, rate, format!("{rate} Hz"));
-                    }
-                });
-            ui.end_row();
-
-            ui.label("Template session");
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.form.template).desired_width(420.0));
-                if ui.button("Browse\u{2026}").clicked() {
+                theme::field(ui, "Session name");
+                ui.add(egui::TextEdit::singleline(&mut self.form.name).desired_width(360.0));
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "Sample rate");
+                egui::ComboBox::from_id_salt("rate")
+                    .selected_text(format!("{} Hz", self.form.sample_rate))
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for rate in [44_100u32, 48_000, 88_200, 96_000] {
+                            ui.selectable_value(&mut self.form.sample_rate, rate, format!("{rate} Hz"));
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "Template session");
+                ui.add(egui::TextEdit::singleline(&mut self.form.template).desired_width(360.0));
+                if ui.button("Browse").clicked() {
                     if let Some(file) = rfd::FileDialog::new()
                         .add_filter("LiveTrax session", &["ardour", "template"])
                         .pick_file()
@@ -724,15 +843,12 @@ impl App {
                     self.form.templates = session::discover_templates();
                 }
             });
-            ui.end_row();
-
-            ui.label("");
-            ui.vertical(|ui| {
-                if self.form.templates.is_empty() {
-                    ui.small("No installed templates found - point at any saved session that has at least one audio track.");
-                } else {
+            if !self.form.templates.is_empty() {
+                ui.horizontal(|ui| {
+                    theme::field(ui, "");
                     egui::ComboBox::from_id_salt("templates")
-                        .selected_text("Installed templates\u{2026}")
+                        .selected_text("Installed templates")
+                        .width(360.0)
                         .show_ui(ui, |ui| {
                             let templates = self.form.templates.clone();
                             for t in templates {
@@ -741,67 +857,36 @@ impl App {
                                 }
                             }
                         });
-                }
-            });
-            ui.end_row();
-
-            let patched = !self.snap.patch_names.is_empty();
-            ui.label(if patched && self.form.use_patch { "Outputs" } else { "Channels" });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    theme::field(ui, "");
+                    ui.label(
+                        egui::RichText::new(
+                            "No installed templates found - point at any saved session with an audio track.",
+                        )
+                        .small()
+                        .color(DIM),
+                    );
+                });
+            }
             ui.horizontal(|ui| {
-                // Bounded by the configured channel count, not the snapshot,
-                // so the form still works before the bridge has published.
-                let max_ch = self.cfg.wing.channels.max(1);
-                ui.add(egui::DragValue::new(&mut self.form.first_ch).range(1..=max_ch));
-                ui.label("to");
-                ui.add(egui::DragValue::new(&mut self.form.last_ch).range(1..=max_ch));
-                ui.checkbox(&mut self.form.include_unnamed, "include unnamed");
-                ui.add_enabled_ui(patched, |ui| {
-                    ui.checkbox(&mut self.form.use_patch, "name from output patch");
+                theme::field(ui, "Options");
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut self.form.connect_inputs, "connect inputs to system:capture_1..N");
+                    ui.checkbox(
+                        &mut self.form.allow_minimal,
+                        "allow a synthesised session with no template (may not open)",
+                    );
                 });
             });
-            ui.end_row();
-            if patched && self.form.use_patch {
-                ui.label("");
-                ui.small(
-                    self.snap
-                        .patch_summary
-                        .clone()
-                        .unwrap_or_default(),
-                );
-                ui.end_row();
-            }
-
-            ui.label("Options");
-            ui.vertical(|ui| {
-                ui.checkbox(
-                    &mut self.form.connect_inputs,
-                    "connect track inputs to system:capture_1..N",
-                );
-                ui.checkbox(
-                    &mut self.form.allow_minimal,
-                    "allow a synthesised session when no template is available (may not open)",
-                );
-            });
-            ui.end_row();
         });
+        ui.add_space(10.0);
 
-        ui.separator();
         let tracks = self.planned_tracks();
         ui.horizontal(|ui| {
-            ui.strong(format!("{} tracks", tracks.len()));
-            if ui.button("Read names from console").clicked() {
-                self.send(Command::QueryWingNames);
-            }
             let enabled = !tracks.is_empty() && !self.snap.session_busy;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::new(
-                        egui::RichText::new("Create LiveTrax session").strong(),
-                    ),
-                )
-                .clicked()
-            {
+            if ui.add_enabled(enabled, theme::primary("Create LiveTrax session")).clicked() {
                 let template = self.form.template.trim();
                 self.send(Command::CreateSession(Box::new(SessionRequest {
                     parent_dir: PathBuf::from(self.form.parent_dir.trim()),
@@ -813,43 +898,69 @@ impl App {
                     allow_minimal: self.form.allow_minimal,
                 })));
             }
+            ui.label(egui::RichText::new(format!("{} tracks", tracks.len())).color(DIM));
+            if ui.button("Read names from console").clicked() {
+                self.send(Command::QueryWingNames);
+            }
             if self.snap.session_busy {
                 ui.spinner();
             }
         });
 
-        egui::ScrollArea::vertical().max_height(160.0).auto_shrink([false, true]).show(ui, |ui| {
-            egui::Grid::new("preview").num_columns(2).striped(true).show(ui, |ui| {
-                for (i, name) in tracks.iter().enumerate() {
-                    ui.monospace(format!("{}", i + 1));
-                    ui.label(name);
-                    ui.end_row();
-                }
-            });
-        });
-
         if let Some(report) = &self.snap.session_report {
-            ui.separator();
-            match report {
+            ui.add_space(6.0);
+            theme::card(ui, |ui| match report {
                 Ok(r) => {
-                    ui.colored_label(
-                        GREEN,
-                        format!("Created {} with {} tracks", r.session_file.display(), r.tracks),
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Created {} with {} tracks",
+                            r.session_file.display(),
+                            r.tracks
+                        ))
+                        .color(GREEN),
                     );
-                    ui.small(format!("folder: {}", r.folder.display()));
+                    ui.label(
+                        egui::RichText::new(format!("folder: {}", r.folder.display()))
+                            .small()
+                            .color(DIM),
+                    );
                     if let Some(t) = &r.template {
-                        ui.small(format!("cloned from {}", t.display()));
+                        ui.label(egui::RichText::new(format!("cloned from {}", t.display())).small().color(DIM));
                     }
                     for w in &r.warnings {
-                        ui.colored_label(AMBER, format!("warning: {w}"));
+                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(AMBER));
                     }
-                    ui.small("Open it in LiveTrax with Session > Open. The bridge is now following this session for markers.");
+                    ui.label(
+                        egui::RichText::new(
+                            "Open it in LiveTrax with Session > Open. The bridge now follows it for markers.",
+                        )
+                        .small()
+                        .color(DIM),
+                    );
                 }
                 Err(e) => {
-                    ui.colored_label(RED, format!("error: {e}"));
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
                 }
-            }
+            });
         }
+
+        ui.add_space(10.0);
+        theme::titled_card(ui, "TRACKS TO BE CREATED", |ui| {
+            if tracks.is_empty() {
+                theme::empty(ui, "Nothing to create - read names from the console, or tick \"include unnamed\".");
+                return;
+            }
+            egui::Grid::new("preview").num_columns(2).striped(true).spacing([12.0, 4.0]).show(
+                ui,
+                |ui| {
+                    for (i, name) in tracks.iter().enumerate() {
+                        theme::num(ui, format!("{}", i + 1));
+                        cell(ui, 260.0, egui::RichText::new(name).color(TEXT));
+                        ui.end_row();
+                    }
+                },
+            );
+        });
     }
 
     fn snapshot_tab(&mut self, ui: &mut egui::Ui) {
@@ -859,21 +970,21 @@ impl App {
                 self.read_session_tracks();
             }
         }
-        ui.heading("Offline WING snapshot from a LiveTrax session");
-        ui.small(
-            "Reads track names from a session file - no DAW or console needed - and writes them \
-             as console channel names. Behringer's snapshot container is undocumented, so the \
-             output is node text: one address/value line per channel, which this tool can also \
-             push straight to the console. Point Template at a snapshot exported from your own \
-             WING (if it is a text file) to rewrite only its name entries.",
-        );
-        ui.separator();
 
-        egui::Grid::new("snap_form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            ui.label("Session file");
+        theme::titled_card(ui, "FROM A LIVETRAX SESSION", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Track names go the other way: out of a session file and onto the console. \
+                     With a .snap template the result is a genuine snapshot - only the names change.",
+                )
+                .small()
+                .color(DIM),
+            );
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.snap_form.session).desired_width(420.0));
-                if ui.button("Browse\u{2026}").clicked() {
+                theme::field(ui, "Session file");
+                ui.add(egui::TextEdit::singleline(&mut self.snap_form.session).desired_width(360.0));
+                if ui.button("Browse").clicked() {
                     if let Some(file) = rfd::FileDialog::new()
                         .add_filter("LiveTrax session", &["ardour"])
                         .pick_file()
@@ -885,39 +996,34 @@ impl App {
                     self.read_session_tracks();
                 }
             });
-            ui.end_row();
-
-            ui.label("Mapping");
             ui.horizontal(|ui| {
                 let patched = self.patch_form.snap.is_some();
+                theme::field(ui, "Mapping");
                 ui.add_enabled_ui(patched, |ui| {
                     ui.checkbox(&mut self.snap_form.use_patch, "via output patch");
                 });
-                ui.label(if patched && self.snap_form.use_patch {
-                    "first output"
-                } else {
-                    "first console channel"
-                });
-                ui.add(
-                    egui::DragValue::new(&mut self.snap_form.first_ch)
-                        .range(1..=self.cfg.wing.channels.max(1)),
+                ui.label(
+                    egui::RichText::new(if patched && self.snap_form.use_patch {
+                        "first output"
+                    } else {
+                        "first channel"
+                    })
+                    .color(DIM),
                 );
-                ui.label("name length");
+                let max_ch = self.cfg.wing.channels.max(1);
+                ui.add(egui::DragValue::new(&mut self.snap_form.first_ch).range(1..=max_ch));
+                ui.label(egui::RichText::new("name length").color(DIM));
                 ui.add(egui::DragValue::new(&mut self.snap_form.max_len).range(0..=32));
-                if ui
-                    .checkbox(&mut self.snap_form.include_busses, "include busses")
-                    .changed()
-                    && !self.snap_form.tracks.is_empty()
-                {
-                    self.read_session_tracks();
-                }
+                ui.checkbox(&mut self.snap_form.include_busses, "include busses");
             });
-            ui.end_row();
+        });
+        ui.add_space(10.0);
 
-            ui.label("Template .snap");
+        theme::titled_card(ui, "WRITE", |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.snap_form.template).desired_width(420.0));
-                if ui.button("Browse\u{2026}").clicked() {
+                theme::field(ui, "Template .snap");
+                ui.add(egui::TextEdit::singleline(&mut self.snap_form.template).desired_width(360.0));
+                if ui.button("Browse").clicked() {
                     if let Some(file) = rfd::FileDialog::new()
                         .add_filter("WING snapshot", &["snap"])
                         .pick_file()
@@ -925,32 +1031,27 @@ impl App {
                         self.snap_form.template = file.display().to_string();
                     }
                 }
-                if !self.patch_form.file.trim().is_empty()
-                    && ui.button("Use loaded patch file").clicked()
-                {
+                if !self.patch_form.file.trim().is_empty() && ui.button("Use the loaded one").clicked() {
                     self.snap_form.template = self.patch_form.file.clone();
                 }
             });
-            ui.end_row();
-
-            ui.label("Output file");
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.snap_form.out).desired_width(420.0));
-                if ui.button("Browse\u{2026}").clicked() {
-                    let default = format!(
-                        "{}-wing.txt",
-                        std::path::Path::new(&self.snap_form.session)
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "snapshot".into())
-                    );
+                theme::field(ui, "Save as");
+                ui.add(egui::TextEdit::singleline(&mut self.snap_form.out).desired_width(360.0));
+                if ui.button("Browse").clicked() {
+                    let stem = std::path::Path::new(&self.snap_form.session)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "snapshot".into());
+                    let is_snap = self.snap_form.template.trim().to_lowercase().ends_with(".snap");
+                    let default = if is_snap { format!("{stem}.snap") } else { format!("{stem}-wing.txt") };
                     if let Some(file) = rfd::FileDialog::new().set_file_name(default).save_file() {
                         self.snap_form.out = file.display().to_string();
                     }
                 }
             });
-            ui.end_row();
         });
+        ui.add_space(10.0);
 
         let via_patch = self.snap_form.use_patch && self.patch_form.snap.is_some();
         let (entries, skipped) = match (&self.patch_form.snap, via_patch) {
@@ -971,67 +1072,73 @@ impl App {
             ),
         };
 
-        ui.separator();
         ui.horizontal(|ui| {
-            ui.strong(format!("{} channels", entries.len()));
             let ready = !entries.is_empty();
             if ui
                 .add_enabled(
                     ready && !self.snap_form.out.trim().is_empty(),
-                    egui::Button::new(egui::RichText::new("Write snapshot file").strong()),
+                    theme::primary("Write snapshot"),
                 )
                 .clicked()
             {
                 self.write_snapshot(&entries);
             }
-            if ui
-                .add_enabled(ready, egui::Button::new("Apply names to console now"))
-                .clicked()
-            {
+            if ui.add_enabled(ready, egui::Button::new("Apply names to console now")).clicked() {
                 self.send(Command::ApplyChannelNames(
                     entries.iter().map(|e| (e.channel, e.name.clone())).collect(),
                 ));
-                self.snap_form.report = Some(Ok(format!(
-                    "sent {} channel names to the console",
-                    entries.len()
-                )));
+                self.snap_form.report =
+                    Some(Ok(format!("sent {} channel names to the console", entries.len())));
             }
-            if entries.is_empty() {
-                ui.small("Read a session first.");
-            }
+            ui.label(egui::RichText::new(format!("{} channels", entries.len())).color(DIM));
             if !skipped.is_empty() {
-                ui.colored_label(
-                    AMBER,
-                    format!("{} tracks skipped: their output carries no channel", skipped.len()),
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} tracks skipped: their output carries no channel",
+                        skipped.len()
+                    ))
+                    .small()
+                    .color(AMBER),
                 );
             }
         });
 
         if let Some(report) = &self.snap_form.report {
+            ui.add_space(6.0);
             match report {
-                Ok(msg) => ui.colored_label(GREEN, msg.clone()),
-                Err(e) => ui.colored_label(RED, format!("error: {e}")),
+                Ok(msg) => ui.label(egui::RichText::new(msg.clone()).color(GREEN)),
+                Err(e) => ui.label(egui::RichText::new(format!("error: {e}")).color(RED)),
             };
         }
 
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            egui::Grid::new("snap_preview").num_columns(4).striped(true).show(ui, |ui| {
-                ui.strong("Out");
-                ui.strong("Ch");
-                ui.strong("Track");
-                ui.strong("Console name");
-                ui.end_row();
-                for e in &entries {
-                    ui.monospace(e.output.map(|o| o.to_string()).unwrap_or_else(|| "-".into()));
-                    ui.monospace(e.channel.to_string());
-                    ui.label(&e.track);
-                    let truncated = e.name != e.track;
-                    ui.label(
-                        egui::RichText::new(&e.name).color(if truncated { AMBER } else { ui.visuals().text_color() }),
-                    );
+        ui.add_space(10.0);
+        theme::titled_card(ui, "NAMES TO BE WRITTEN", |ui| {
+            if entries.is_empty() {
+                theme::empty(ui, "Read a session first.");
+                return;
+            }
+            egui::Grid::new("snap_preview").num_columns(4).striped(true).spacing([12.0, 4.0]).show(
+                ui,
+                |ui| {
+                    theme::column(ui, "OUT");
+                    theme::column(ui, "CH");
+                    theme::column(ui, "TRACK");
+                    theme::column(ui, "CONSOLE NAME");
                     ui.end_row();
-                }
-            });
+                    for e in &entries {
+                        theme::num(ui, e.output.map(|o| o.to_string()).unwrap_or_else(|| "-".into()));
+                        theme::num(ui, e.channel.to_string());
+                        cell(ui, 200.0, egui::RichText::new(&e.track).color(DIM));
+                        let truncated = e.name != e.track;
+                        cell(
+                            ui,
+                            160.0,
+                            egui::RichText::new(&e.name).color(if truncated { AMBER } else { TEXT }),
+                        );
+                        ui.end_row();
+                    }
+                },
+            );
         });
     }
 
@@ -1041,8 +1148,7 @@ impl App {
             .and_then(|p| snapshot::read_tracks(&p, self.snap_form.include_busses))
         {
             Ok(tracks) => {
-                self.snap_form.report =
-                    Some(Ok(format!("read {} tracks from the session", tracks.len())));
+                self.snap_form.report = Some(Ok(format!("read {} tracks from the session", tracks.len())));
                 self.snap_form.tracks = tracks;
             }
             Err(e) => {
@@ -1072,105 +1178,113 @@ impl App {
             skipped: Vec::new(),
         };
         let out = PathBuf::from(self.snap_form.out.trim());
-        self.snap_form.report = match snapshot::write(
-            &plan,
-            &req,
-            &self.cfg.snapshot,
-            &self.cfg.wing,
-            &out,
-        ) {
-            Ok(report) => {
-                let mut msg = format!("wrote {} channels to {}", report.written, report.path.display());
-                if !report.unmatched.is_empty() {
-                    msg.push_str(&format!(
-                        " - no line in the template for channels {:?}",
-                        report.unmatched
-                    ));
+        self.snap_form.report =
+            match snapshot::write(&plan, &req, &self.cfg.snapshot, &self.cfg.wing, &out) {
+                Ok(report) => {
+                    let mut msg = match &report.template {
+                        Some(t) => format!(
+                            "wrote {} names into a copy of {} at {}",
+                            report.written,
+                            t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                            report.path.display()
+                        ),
+                        None => format!("wrote {} channels to {}", report.written, report.path.display()),
+                    };
+                    if !report.unmatched.is_empty() {
+                        msg.push_str(&format!(" - no entry for channels {:?}", report.unmatched));
+                    }
+                    Some(Ok(msg))
                 }
-                Some(Ok(msg))
-            }
-            Err(e) => Some(Err(format!("{e:#}"))),
-        };
+                Err(e) => Some(Err(format!("{e:#}"))),
+            };
     }
 
     fn log_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Log");
             if ui.button("Clear").clicked() {
                 self.log.clear();
             }
+            ui.label(egui::RichText::new("newest at the bottom").small().color(DIM));
         });
-        ui.separator();
+        ui.add_space(6.0);
         let lines = self.log.lines();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in lines {
-                    let color = if line.contains("ERROR") {
-                        RED
-                    } else if line.contains("WARN") {
-                        AMBER
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.label(egui::RichText::new(line).monospace().color(color));
-                }
-            });
+        theme::card(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in lines {
+                        let color = if line.contains("ERROR") {
+                            RED
+                        } else if line.contains("WARN") {
+                            AMBER
+                        } else {
+                            DIM
+                        };
+                        ui.label(egui::RichText::new(line).monospace().size(11.5).color(color));
+                    }
+                });
+        });
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.small("Host, port and address settings live in the config file; edit it and restart.");
-        ui.separator();
-
-        let mut names_enabled = self.snap.names_enabled;
-        if ui.checkbox(&mut names_enabled, "Channel name sync").changed() {
-            self.send(Command::SetNamesEnabled(names_enabled));
-        }
-        ui.horizontal(|ui| {
-            ui.label("Direction:");
-            let mut dir = self.snap.names_direction;
-            for (value, label) in [
-                (Direction::WingToDaw, "console -> DAW"),
-                (Direction::DawToWing, "DAW -> console"),
-                (Direction::Bidirectional, "both"),
-            ] {
-                if ui.selectable_value(&mut dir, value, label).clicked() {
-                    self.send(Command::SetNamesDirection(value));
+        theme::titled_card(ui, "SYNC", |ui| {
+            let mut names_enabled = self.snap.names_enabled;
+            if ui.checkbox(&mut names_enabled, "Channel name sync").changed() {
+                self.send(Command::SetNamesEnabled(names_enabled));
+            }
+            ui.horizontal(|ui| {
+                theme::field(ui, "Direction");
+                let mut dir = self.snap.names_direction;
+                for (value, label) in [
+                    (Direction::WingToDaw, "console -> DAW"),
+                    (Direction::DawToWing, "DAW -> console"),
+                    (Direction::Bidirectional, "both"),
+                ] {
+                    if ui.selectable_value(&mut dir, value, label).clicked() {
+                        self.send(Command::SetNamesDirection(value));
+                    }
                 }
+            });
+            let mut scenes_enabled = self.snap.scenes_enabled;
+            if ui.checkbox(&mut scenes_enabled, "Scene <-> marker linking").changed() {
+                self.send(Command::SetScenesEnabled(scenes_enabled));
             }
         });
+        ui.add_space(10.0);
 
-        let mut scenes_enabled = self.snap.scenes_enabled;
-        if ui.checkbox(&mut scenes_enabled, "Scene <-> marker linking").changed() {
-            self.send(Command::SetScenesEnabled(scenes_enabled));
-        }
-
-        ui.separator();
-        egui::Grid::new("settings").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-            ui.label("Console");
-            ui.monospace(format!("{}:{}", self.cfg.wing.host, self.cfg.wing.port));
-            ui.end_row();
-            ui.label("LiveTrax");
-            ui.monospace(format!("{}:{}", self.cfg.livetrax.host, self.cfg.livetrax.port));
-            ui.end_row();
-            ui.label("Channel name address");
-            ui.monospace(&self.cfg.wing.name_address);
-            ui.end_row();
-            ui.label("Scene address");
-            ui.monospace(&self.cfg.scenes.scene_address);
-            ui.end_row();
-            ui.label("Session file");
+        theme::titled_card(ui, "CONNECTIONS", |ui| {
+            ui.label(
+                egui::RichText::new("Hosts, ports and addresses live in the config file; edit it and restart.")
+                    .small()
+                    .color(DIM),
+            );
+            ui.add_space(4.0);
+            for (label, value) in [
+                ("Console", format!("{}:{}", self.cfg.wing.host, self.cfg.wing.port)),
+                ("LiveTrax", format!("{}:{}", self.cfg.livetrax.host, self.cfg.livetrax.port)),
+                ("Channel name address", self.cfg.wing.name_address.clone()),
+                ("Scene address", self.cfg.scenes.scene_address.clone()),
+            ] {
+                ui.horizontal(|ui| {
+                    theme::field(ui, label);
+                    ui.label(egui::RichText::new(value).monospace().color(TEXT));
+                });
+            }
             ui.horizontal(|ui| {
-                ui.monospace(
-                    self.snap
-                        .session_file
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "-".into()),
+                theme::field(ui, "Session file");
+                ui.label(
+                    egui::RichText::new(
+                        self.snap
+                            .session_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    )
+                    .monospace()
+                    .color(TEXT),
                 );
-                if ui.small_button("Choose\u{2026}").clicked() {
+                if ui.small_button("Choose").clicked() {
                     if let Some(file) = rfd::FileDialog::new()
                         .add_filter("LiveTrax session", &["ardour"])
                         .pick_file()
@@ -1179,39 +1293,73 @@ impl App {
                     }
                 }
             });
-            ui.end_row();
         });
+        ui.add_space(10.0);
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Save settings to config file").clicked() {
-                self.send(Command::SaveConfig(self.cfg_path.clone()));
-            }
-            ui.small("Rewrites the TOML from the running configuration; comments are lost.");
+        theme::titled_card(ui, "CONFIG FILE", |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Save settings to the config file").clicked() {
+                    self.send(Command::SaveConfig(self.cfg_path.clone()));
+                }
+                ui.label(
+                    egui::RichText::new("Rewrites the TOML from what is running; comments are lost.")
+                        .small()
+                        .color(DIM),
+                );
+            });
         });
     }
 }
 
-// ----------------------------------------------------------------- helpers --
+// ---------------------------------------------------------- helpers --------
 
-fn link_pill(ui: &mut egui::Ui, label: &str, last: Option<std::time::Instant>) {
-    let (color, detail) = match last {
-        Some(t) if t.elapsed() < Duration::from_secs(10) => {
-            (GREEN, format!("{:.0}s ago", t.elapsed().as_secs_f32()))
-        }
-        Some(t) => (AMBER, format!("{:.0}s ago", t.elapsed().as_secs_f32())),
-        None => (RED, "no traffic".to_string()),
-    };
-    dot(ui, color);
-    ui.colored_label(color, label);
-    ui.small(egui::RichText::new(detail).color(DIM));
+fn bar_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::PANEL)
+        .inner_margin(egui::Margin::symmetric(14, 8))
 }
 
-/// A status dot, painted rather than drawn from a font: the bundled egui fonts
-/// have no glyph for it.
-fn dot(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, color);
+fn tabs_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::BG)
+        .inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 4 })
+}
+
+/// A fixed-width, left-aligned table cell, so columns stay put as names change.
+fn cell(ui: &mut egui::Ui, width: f32, text: egui::RichText) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add(egui::Label::new(text).truncate());
+        },
+    );
+}
+
+/// A small rounded label for a piece of live state.
+fn chip(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::CARD)
+        .corner_radius(egui::CornerRadius::same(9))
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).small().color(ACCENT));
+        });
+}
+
+fn link_color(last: Option<std::time::Instant>) -> egui::Color32 {
+    match last {
+        Some(t) if t.elapsed() < Duration::from_secs(10) => GREEN,
+        Some(_) => AMBER,
+        None => RED,
+    }
+}
+
+fn age(last: Option<std::time::Instant>) -> String {
+    match last {
+        Some(t) => format!("{:.0}s", t.elapsed().as_secs_f32()),
+        None => "silent".to_string(),
+    }
 }
 
 fn timecode(samples: i64, rate: f64) -> String {

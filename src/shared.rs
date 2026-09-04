@@ -48,8 +48,8 @@ pub struct Snapshot {
     pub patch_summary: Option<String>,
     pub patch_group: Option<String>,
     pub patch_source: Option<String>,
-    /// Output number -> resolved name, from the patch.
-    pub patch_names: Vec<(u16, String)>,
+    /// The patch itself: output, what feeds it, and the resolved name.
+    pub patch_slots: Vec<crate::patch::Slot>,
     pub channels: u16,
     /// Result of the most recent "create session" request.
     pub session_report: Option<Result<SessionReport, String>>,

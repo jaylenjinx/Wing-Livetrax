@@ -55,8 +55,8 @@ struct PatchInfo {
     group: String,
     outputs: usize,
     mapped: usize,
-    /// Output number -> name, for naming new sessions.
-    names: Vec<(u16, String)>,
+    /// The resolved patch, for naming new sessions and for display.
+    slots: Vec<crate::patch::Slot>,
 }
 
 impl PatchInfo {
@@ -147,7 +147,7 @@ impl Bridge {
                 let info = PatchInfo {
                     outputs: slots.len(),
                     mapped,
-                    names: slots.iter().map(|s| (s.output, s.name.clone())).collect(),
+                    slots: slots.clone(),
                     source: path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -804,7 +804,7 @@ impl Bridge {
             group: group.to_string(),
             outputs: slots.len(),
             mapped,
-            names: slots.iter().map(|s| (s.output, s.name.clone())).collect(),
+            slots: slots.clone(),
         };
         tracing::info!("patch: {}", info.summary());
         if self.cfg.patch.use_for_map {
@@ -1001,10 +1001,10 @@ impl Bridge {
         s.patch_summary = self.patch.as_ref().map(PatchInfo::summary);
         s.patch_group = self.patch.as_ref().map(|p| p.group.clone());
         s.patch_source = self.patch.as_ref().map(|p| p.source.clone());
-        s.patch_names = self
+        s.patch_slots = self
             .patch
             .as_ref()
-            .map(|p| p.names.clone())
+            .map(|p| p.slots.clone())
             .unwrap_or_default();
     }
 

@@ -11,6 +11,7 @@ mod patch;
 mod shared;
 mod snapfile;
 mod snapshot;
+mod theme;
 mod wing;
 
 use anyhow::{Context, Result};
