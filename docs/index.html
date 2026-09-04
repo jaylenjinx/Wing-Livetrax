@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WING LiveTrax Bridge</title>
+<meta name="description" content="Documentation for the OSC bridge between a Behringer WING console and Harrison LiveTrax 3.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #f4f6f7;
+  --surface: #ffffff;
+  --surface-2: #e9edef;
+  --edge: #d2d9dd;
+  --edge-strong: #b6c1c7;
+  --text: #161d21;
+  --text-dim: #55666e;
+  --accent: #10708a;
+  --accent-soft: #d7ebf1;
+  --good: #2f7d4e;
+  --warn: #96650c;
+  --bad: #b03a2c;
+  --code-ground: #10171b;
+  --code-text: #d7e2e7;
+  --shadow: 0 1px 2px rgba(16, 29, 35, .06), 0 8px 24px -16px rgba(16, 29, 35, .28);
+  --rail: 232px;
+  --measure: 68ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #12171a;
+    --surface: #191f23;
+    --surface-2: #212a2f;
+    --edge: #2b353b;
+    --edge-strong: #3d4a51;
+    --text: #e3e9ec;
+    --text-dim: #93a3ab;
+    --accent: #58bbd3;
+    --accent-soft: #17323c;
+    --good: #6ec98a;
+    --warn: #dfb154;
+    --bad: #e2776a;
+    --code-ground: #0d1215;
+    --code-text: #d7e2e7;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -18px rgba(0, 0, 0, .8);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #12171a;
+  --surface: #191f23;
+  --surface-2: #212a2f;
+  --edge: #2b353b;
+  --edge-strong: #3d4a51;
+  --text: #e3e9ec;
+  --text-dim: #93a3ab;
+  --accent: #58bbd3;
+  --accent-soft: #17323c;
+  --good: #6ec98a;
+  --warn: #dfb154;
+  --bad: #e2776a;
+  --code-ground: #0d1215;
+  --code-text: #d7e2e7;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -18px rgba(0, 0, 0, .8);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font: 400 16px/1.62 "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, .eyebrow, .rail a, .tag {
+  font-family: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  text-wrap: balance;
+}
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, kbd, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { font-size: .87em; background: var(--surface-2); padding: .08em .32em; border-radius: 3px; line-height: 1.35; }
+pre code { background: none; padding: 0; }
+
+/* ---------- masthead ---------- */
+.masthead {
+  border-bottom: 1px solid var(--edge);
+  background: var(--surface);
+}
+.masthead-inner {
+  max-width: 1180px; margin: 0 auto; padding: 30px 28px 26px;
+  display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; justify-content: space-between;
+}
+.wordmark { display: flex; gap: 14px; align-items: center; }
+.wordmark svg { flex: none; }
+h1 { margin: 0; font-size: 34px; font-weight: 700; letter-spacing: .01em; line-height: 1.06; }
+.lede { margin: 6px 0 0; color: var(--text-dim); max-width: 46ch; font-size: 16.5px; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tag {
+  font-size: 13px; letter-spacing: .07em; text-transform: uppercase; font-weight: 600;
+  padding: 4px 9px; border: 1px solid var(--edge-strong); border-radius: 2px; color: var(--text-dim);
+}
+.tag.live { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- shell ---------- */
+.shell { max-width: 1180px; margin: 0 auto; padding: 0 28px 90px; display: flex; gap: 44px; align-items: flex-start; }
+.rail {
+  position: sticky; top: 22px; width: var(--rail); flex: none; padding-top: 34px;
+  max-height: calc(100vh - 44px); overflow-y: auto;
+}
+.rail ol { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
+.rail li { counter-increment: sec; }
+.rail a {
+  display: grid; grid-template-columns: 26px 1fr; gap: 8px; align-items: baseline;
+  padding: 5px 0 5px 10px; margin-left: -11px;
+  border-left: 2px solid transparent;
+  color: var(--text-dim); text-decoration: none; font-size: 16px; letter-spacing: .01em;
+}
+.rail a::before { content: counter(sec, decimal-leading-zero); font-size: 12px; color: var(--edge-strong); font-variant-numeric: tabular-nums; }
+.rail a:hover { color: var(--text); }
+.rail a[aria-current="true"] { color: var(--accent); border-left-color: var(--accent); }
+.rail a[aria-current="true"]::before { color: var(--accent); }
+main { flex: 1 1 auto; min-width: 0; padding-top: 30px; }
+
+/* ---------- sections ---------- */
+section { padding-block: 26px 6px; scroll-margin-top: 18px; }
+section + section { border-top: 1px solid var(--edge); }
+.eyebrow {
+  font-size: 12.5px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--text-dim); font-weight: 600; margin: 0 0 4px;
+}
+h2 { margin: 0 0 12px; font-size: 27px; font-weight: 600; letter-spacing: .005em; }
+h3 { margin: 26px 0 8px; font-size: 20px; font-weight: 600; letter-spacing: .01em; }
+p, ul, ol { max-width: var(--measure); }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 20px; }
+li { margin-bottom: 6px; }
+li::marker { color: var(--edge-strong); }
+.small { font-size: 14.5px; color: var(--text-dim); }
+
+/* ---------- signal path ---------- */
+figure { margin: 0 0 20px; }
+figure.diagram { background: var(--surface); border: 1px solid var(--edge); border-radius: 6px; padding: 18px 16px 10px; box-shadow: var(--shadow); }
+figure.diagram svg { width: 100%; height: auto; display: block; }
+figcaption { font-size: 14px; color: var(--text-dim); margin-top: 8px; }
+figure.shot { margin: 18px 0 22px; max-width: none; }
+figure.shot img { width: 100%; display: block; border: 1px solid var(--edge); border-radius: 6px; box-shadow: var(--shadow); }
+
+/* ---------- code ---------- */
+.code { position: relative; margin: 0 0 18px; }
+pre {
+  margin: 0; background: var(--code-ground); color: var(--code-text);
+  padding: 14px 16px; border-radius: 6px; overflow-x: auto;
+  font-size: 13.5px; line-height: 1.62; border: 1px solid var(--edge);
+}
+.code button {
+  position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity .12s;
+  background: rgba(255,255,255,.08); color: #cfdade; border: 1px solid rgba(255,255,255,.16);
+  border-radius: 4px; font: 500 11px/1 "Barlow Condensed", sans-serif; letter-spacing: .1em;
+  text-transform: uppercase; padding: 5px 8px; cursor: pointer;
+}
+.code:hover button, .code button:focus-visible { opacity: 1; }
+pre .c { color: #7f939c; }
+
+/* ---------- tables ---------- */
+.table-wrap { overflow-x: auto; margin: 0 0 20px; border: 1px solid var(--edge); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--edge); vertical-align: top; }
+thead th {
+  font-family: "Barlow Condensed", sans-serif; font-size: 13px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text-dim); font-weight: 600; background: var(--surface-2);
+}
+tbody tr:last-child td { border-bottom: none; }
+td code { white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; }
+
+/* ---------- notes ---------- */
+.note {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  padding: 12px 16px; border-radius: 0 5px 5px 0; margin: 0 0 18px; max-width: var(--measure);
+}
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); }
+.note p:last-child { margin-bottom: 0; }
+.note strong { font-weight: 600; }
+
+/* ---------- steps ---------- */
+.steps { list-style: none; padding: 0; counter-reset: step; max-width: var(--measure); }
+.steps > li {
+  counter-increment: step; position: relative; padding-left: 42px; margin-bottom: 20px;
+}
+.steps > li::before {
+  content: counter(step); position: absolute; left: 0; top: -1px;
+  width: 27px; height: 27px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--surface-2); border: 1px solid var(--edge-strong); color: var(--text-dim);
+  font: 600 14px/1 "Barlow Condensed", sans-serif;
+}
+.steps h3 { margin: 0 0 4px; font-size: 18px; }
+
+/* ---------- state chips ---------- */
+.chip { display: inline-block; font-size: 12.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid currentColor; }
+.chip.good { color: var(--good); }
+.chip.warn { color: var(--warn); }
+.chip.bad { color: var(--bad); }
+
+footer { border-top: 1px solid var(--edge); margin-top: 40px; padding-top: 18px; color: var(--text-dim); font-size: 14px; max-width: var(--measure); }
+
+@media (max-width: 900px) {
+  .shell { flex-direction: column; gap: 0; padding-inline: 20px; }
+  .rail {
+    position: static; width: auto; max-height: none; padding-top: 18px;
+    border-bottom: 1px solid var(--edge); padding-bottom: 12px; margin-bottom: 6px;
+  }
+  .rail ol { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .rail ol::-webkit-scrollbar { display: none; }
+  .rail li { flex: none; }
+  .rail a { border-left: none; border-bottom: 2px solid transparent; padding: 4px 8px; margin: 0; grid-template-columns: auto; }
+  .rail a::before { display: none; }
+  .rail a[aria-current="true"] { border-bottom-color: var(--accent); }
+  .masthead-inner { padding: 22px 20px; }
+  h1 { font-size: 28px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div class="wordmark">
+      <svg width="52" height="52" viewBox="0 0 52 52" role="img" aria-label="App icon">
+        <rect x="1" y="1" width="50" height="50" rx="12" fill="var(--surface-2)" stroke="var(--edge-strong)"/>
+        <g fill="var(--text-dim)">
+          <rect x="13" y="11" width="3" height="16" rx="1.5"/>
+          <rect x="20" y="11" width="3" height="16" rx="1.5"/>
+          <rect x="27" y="11" width="3" height="16" rx="1.5"/>
+          <rect x="34" y="11" width="3" height="16" rx="1.5"/>
+        </g>
+        <g fill="var(--text)">
+          <rect x="11" y="16" width="7" height="4" rx="2"/>
+          <rect x="18" y="21" width="7" height="4" rx="2"/>
+          <rect x="25" y="13" width="7" height="4" rx="2"/>
+          <rect x="32" y="19" width="7" height="4" rx="2"/>
+        </g>
+        <rect x="10" y="38" width="32" height="2" rx="1" fill="var(--text-dim)"/>
+        <rect x="17" y="31" width="2" height="11" rx="1" fill="var(--text)"/>
+        <path d="M19 31 L28 33.5 L19 36 Z" fill="var(--accent)"/>
+      </svg>
+      <div>
+        <h1>WING LiveTrax Bridge</h1>
+        <p class="lede">Keeps a Behringer WING and Harrison LiveTrax 3 talking: names, transport, markers, and whole sessions.</p>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="tag live">v0.1.0</span>
+      <span class="tag">macOS</span>
+      <span class="tag">Rust</span>
+      <span class="tag">OSC / UDP</span>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="rail" aria-label="Sections">
+    <ol>
+      <li><a href="#what">What it does</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#first-run">First run</a></li>
+      <li><a href="#patch">The recorded output</a></li>
+      <li><a href="#names">Channel names</a></li>
+      <li><a href="#transport">Transport</a></li>
+      <li><a href="#scenes">Scenes &amp; markers</a></li>
+      <li><a href="#session">Session from console</a></li>
+      <li><a href="#snapshot">Snapshot from session</a></li>
+      <li><a href="#commands">Command reference</a></li>
+      <li><a href="#config">Configuration</a></li>
+      <li><a href="#protocol">Protocol notes</a></li>
+      <li><a href="#trouble">Troubleshooting</a></li>
+      <li><a href="#build">Build &amp; package</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <section id="what">
+      <p class="eyebrow">Overview</p>
+      <h2>What it does</h2>
+      <figure class="diagram">
+        <svg viewBox="0 0 720 150" role="img" aria-label="WING console and LiveTrax both connect to the bridge over OSC on UDP: port 2223 to the console, port 3819 to LiveTrax.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+            </marker>
+          </defs>
+          <g font-family="Barlow Condensed, sans-serif">
+            <rect x="8" y="34" width="176" height="72" rx="6" fill="var(--surface-2)" stroke="var(--edge-strong)"/>
+            <text x="96" y="64" text-anchor="middle" font-size="19" fill="var(--text)">Behringer WING</text>
+            <text x="96" y="86" text-anchor="middle" font-size="14" fill="var(--text-dim)" font-family="JetBrains Mono, monospace">OSC / UDP 2223</text>
+
+            <rect x="272" y="26" width="176" height="88" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="360" y="58" text-anchor="middle" font-size="19" fill="var(--text)">the bridge</text>
+            <text x="360" y="78" text-anchor="middle" font-size="13.5" fill="var(--text-dim)">names · transport</text>
+            <text x="360" y="95" text-anchor="middle" font-size="13.5" fill="var(--text-dim)">scenes · sessions</text>
+
+            <rect x="536" y="34" width="176" height="72" rx="6" fill="var(--surface-2)" stroke="var(--edge-strong)"/>
+            <text x="624" y="64" text-anchor="middle" font-size="19" fill="var(--text)">Harrison LiveTrax 3</text>
+            <text x="624" y="86" text-anchor="middle" font-size="14" fill="var(--text-dim)" font-family="JetBrains Mono, monospace">OSC / UDP 3819</text>
+
+            <line x1="190" y1="70" x2="266" y2="70" stroke="var(--accent)" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+            <line x1="454" y1="70" x2="530" y2="70" stroke="var(--accent)" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+            <text x="228" y="60" text-anchor="middle" font-size="13" fill="var(--text-dim)">names</text>
+            <text x="492" y="60" text-anchor="middle" font-size="13" fill="var(--text-dim)">strips</text>
+          </g>
+        </svg>
+        <figcaption>Both ends are plain UDP, so the bridge can run on the LiveTrax machine, on the console's network, or on a laptop in between.</figcaption>
+      </figure>
+
+      <ul>
+        <li><strong>Channel names</strong> sync in either direction, debounced and echo-suppressed so a name never ping-pongs.</li>
+        <li><strong>Transport and record</strong> run from console user buttons, with the DAW's state fed back to their LEDs.</li>
+        <li><strong>Scenes link to markers</strong>: recalling a scene locates the playhead, or drops a named marker if you are already rolling.</li>
+        <li><strong>Sessions</strong> can be built from the console's channel list, tracks named and in the right order.</li>
+        <li><strong>Snapshots</strong> go the other way: a LiveTrax session's track names written into a real <code>.snap</code>.</li>
+        <li><strong>Everything maps through the console's own output patch</strong>, read from a snapshot file or queried live.</li>
+      </ul>
+    </section>
+
+    <section id="install">
+      <p class="eyebrow">Getting it</p>
+      <h2>Install</h2>
+      <p>Open <code>WING LiveTrax Bridge.app</code> from the disk image, or drag it to Applications. It is signed ad-hoc, so the first launch may need a right-click → Open.</p>
+      <p>From source, with a Rust toolchain:</p>
+      <div class="code"><pre><code>git clone &lt;your remote&gt; wing-livetrax-bridge
+cd wing-livetrax-bridge
+cargo build --release          <span class="c"># target/release/wing-livetrax-bridge</span>
+packaging/bundle.sh --dmg      <span class="c"># dist/WING LiveTrax Bridge.app + .dmg</span></code></pre></div>
+      <p class="small">The app and the command line are the same binary: run it with no arguments for the window, or with a subcommand for the terminal.</p>
+    </section>
+
+    <section id="first-run">
+      <p class="eyebrow">Setup</p>
+      <h2>First run</h2>
+      <ol class="steps">
+        <li>
+          <h3>Turn on OSC in LiveTrax</h3>
+          <p>Edit → Preferences → Control Surfaces → tick <strong>Open Sound Control (OSC)</strong>. Nothing reaches the DAW until this is on. Note its port; 3819 is the default.</p>
+        </li>
+        <li>
+          <h3>Find the console</h3>
+          <p>Setup → Network on the WING gives you its IP. OSC is served on 2223 by the firmware; there is nothing to enable.</p>
+        </li>
+        <li>
+          <h3>Point the config at both</h3>
+          <p>The app writes a starter config on first launch to <code>~/Library/Application&nbsp;Support/WING&nbsp;LiveTrax&nbsp;Bridge/config.toml</code>. Set <code>wing.host</code> and, if the bridge runs on another machine, <code>livetrax.host</code>.</p>
+          <div class="code"><pre><code>wing-livetrax-bridge init -o config.toml   <span class="c"># or make your own</span></code></pre></div>
+        </li>
+        <li>
+          <h3>Confirm the console's addresses</h3>
+          <p>This is the step not to skip: WING's node tree has shifted between firmware revisions, so every console address is configuration rather than code.</p>
+          <div class="code"><pre><code>wing-livetrax-bridge learn   <span class="c"># press a USER button, recall a scene</span></code></pre></div>
+          <p>Paste what it prints into <code>[[transport.buttons]]</code> and <code>scenes.scene_address</code>.</p>
+        </li>
+        <li>
+          <h3>Check the DAW answers</h3>
+          <div class="code"><pre><code>wing-livetrax-bridge strips    <span class="c"># ssid + track name for every strip</span>
+wing-livetrax-bridge markers   <span class="c"># markers from the session file</span></code></pre></div>
+          <p>Then open the app, or run <code>wing-livetrax-bridge run</code> for a headless daemon that logs to the terminal.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="patch">
+      <p class="eyebrow">The idea that makes the rest work</p>
+      <h2>Which output feeds the DAW</h2>
+      <p>A WING records through one port group — USB, the card, AES50 — and that group's <strong>output patch</strong> decides which source lands on which track. It is rarely channel 1 to track 1.</p>
+      <div class="note">
+        <p>In a real show file: USB output 14 carries local input 14, which is console channel <strong>17</strong>, named <em>VOX</em>. Mapping channels straight across put five names on the wrong tracks. The bridge maps through the patch instead, so DAW strip N is output N of the chosen group.</p>
+      </div>
+      <figure class="shot">
+        <img src="ui-channels.png" alt="The Channels tab: a snapshot file and output group selected at the top, and a table pairing console channels with LiveTrax strips, showing what each is patched from.">
+        <figcaption>Each row shows the console name, what it is patched from, and the LiveTrax strip it therefore owns.</figcaption>
+      </figure>
+      <h3>Two ways to read it</h3>
+      <ul>
+        <li><strong>From a <code>.snap</code></strong> saved from the console — works with the desk switched off, and the dropdown lists every group with how much of it is patched.</li>
+        <li><strong>From the console</strong> — press <em>Ask the console</em> and the patch is queried live over OSC, so it matches what the desk is doing right now.</li>
+      </ul>
+      <div class="code"><pre><code>wing-livetrax-bridge snap-info MYSHOW.snap                <span class="c"># list the groups</span>
+wing-livetrax-bridge snap-info MYSHOW.snap --output USB   <span class="c"># resolve one</span>
+wing-livetrax-bridge patch --output USB                   <span class="c"># the same, live</span>
+wing-livetrax-bridge patch --groups                       <span class="c"># what the desk answers for</span></code></pre></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Group</th><th>Port</th><th>Patched</th><th>What it usually is</th></tr></thead>
+          <tbody>
+            <tr><td><code>USB</code></td><td>USB audio</td><td class="num">34 of 48</td><td>The DAW feed on most WING rigs</td></tr>
+            <tr><td><code>LCL</code></td><td>Local outputs</td><td class="num">8 of 8</td><td>Wedges, fills, PA</td></tr>
+            <tr><td><code>A</code></td><td>AES50-A</td><td class="num">4 of 48</td><td>Stage box, monitor world</td></tr>
+            <tr><td><code>CRD</code></td><td>Card / WLIVE</td><td class="num">0 of 64</td><td>The card recorder, when fitted</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small">Counts above are from a real show file. Resolution walks the patch properly: a channel's name when a channel owns that input, the console's socket label when none does, otherwise the mix object — and because the desk's mix objects are stereo and the patch addresses them one leg at a time, <code>MAIN 5</code> comes back as <em>BAND L</em>.</p>
+    </section>
+
+    <section id="names">
+      <p class="eyebrow">Feature</p>
+      <h2>Channel names</h2>
+      <p>Console channel names and LiveTrax track names, kept in step. <code>names.direction</code> picks the authority: <code>wing-to-daw</code> (the usual live-recording workflow), <code>daw-to-wing</code>, or <code>bidirectional</code> with last-change-wins.</p>
+      <p>Changes are debounced so typing on the console does not fire a message per keystroke, and every value the bridge writes is remembered briefly so the echo coming back does not start a loop. Placeholder names — <code>Audio 3</code>, <code>Ch 12</code> — are treated as unnamed and left alone.</p>
+      <div class="note warn">
+        <p><strong>Rename support varies.</strong> Ardour-family builds differ on whether a strip can be renamed over OSC. The bridge watches for the confirming feedback and, if several renames go unacknowledged, says so once and points at <code>livetrax.rename_address</code> or <code>direction = "daw-to-wing"</code>, which relies only on standard feedback and works on any build.</p>
+      </div>
+    </section>
+
+    <section id="transport">
+      <p class="eyebrow">Feature</p>
+      <h2>Transport and record</h2>
+      <p>Each <code>[[transport.buttons]]</code> entry binds one console address to one action:</p>
+      <div class="code"><pre><code>[[transport.buttons]]
+address = "/$ctl/user/1/bu/1"
+action = "toggle_play"
+
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/3"
+action = { locate_marker = "Song 3" }</code></pre></div>
+      <p>Available actions: <code>play</code>, <code>stop</code>, <code>toggle_play</code>, <code>record_arm_toggle</code>, <code>record_start</code>, <code>goto_start</code>, <code>goto_end</code>, <code>next_marker</code>, <code>prev_marker</code>, <code>add_marker</code>, <code>{ locate_marker = "…" }</code>, <code>{ access_action = "…" }</code>, and a raw <code>{ osc = { … } }</code> escape hatch.</p>
+      <p>Per-track arming uses <code>[[transport.rec_arm]]</code>; DAW state comes back to the console's LEDs through <code>[[transport.leds]]</code>.</p>
+    </section>
+
+    <section id="scenes">
+      <p class="eyebrow">Feature</p>
+      <h2>Scenes and markers</h2>
+      <p><code>scenes.map</code> pairs a console scene index with a marker name, and what happens depends on the transport:</p>
+      <ul>
+        <li><strong>Stopped</strong> — recalling scene <em>n</em> locates the playhead to its marker, optionally rolling.</li>
+        <li><strong>Rolling</strong> — recalling scene <em>n</em> drops a marker named after the scene at the current position, so a scene change during a take is logged rather than destructive.</li>
+        <li><strong>Reverse</strong> — passing a mapped marker recalls the matching scene on the console.</li>
+      </ul>
+      <figure class="shot">
+        <img src="ui-scenes.png" alt="The Scenes and markers tab: the scene-to-marker map with found or missing status per row, and the marker list with locate buttons.">
+        <figcaption>Each mapping says whether its marker actually exists in the session, before a show rather than during one.</figcaption>
+      </figure>
+      <p>Marker <em>positions</em> come from the session file, because LiveTrax does not publish its location list over OSC. Point <code>livetrax.session_file</code> at the <code>.ardour</code> file or its folder; it is re-read whenever LiveTrax saves. Markers made since the last save are learned live from marker feedback, so they work immediately — but save the session if you want them to survive a restart.</p>
+      <p class="small">A scene index the console re-reports (which it does on every subscription refresh) is ignored, so the playhead does not jump on a timer. Set <code>retrigger_same_scene</code> if you want a deliberate re-recall of the same scene to act again.</p>
+    </section>
+
+    <section id="session">
+      <p class="eyebrow">Feature</p>
+      <h2>A session built from the console</h2>
+      <p>The <strong>New session</strong> tab writes a session folder whose tracks carry the console's names, in recorded-output order.</p>
+      <figure class="shot">
+        <img src="ui-session.png" alt="The New session tab: track name source, destination folder, sample rate and template session, with a preview list of the tracks that will be created.">
+      </figure>
+      <p>It works by <strong>cloning a track out of a template session</strong> your own LiveTrax wrote: the route is copied once per channel, renamed along with its IO and ports, given fresh unique ids, and the template's playlists, regions, sources and markers are dropped. The route graph is therefore exactly what your version produces — nothing is guessed.</p>
+      <p>Names are made port-safe, duplicates are numbered (<code>GTR-L</code>, <code>GTR-L 2</code>), unnamed channels are skipped unless you ask for them, inputs can be pointed at <code>system:capture_1..N</code>, and an existing folder is never overwritten.</p>
+      <div class="code"><pre><code><span class="c"># from a saved show file, with the console switched off</span>
+wing-livetrax-bridge new-session --dest ~/LiveTrax --name "Friday Show" \
+  --from-snap MYSHOW.snap --output USB --outputs 1-34 --include-unnamed \
+  --template ~/LiveTrax/Empty/Empty.ardour</code></pre></div>
+      <p class="small">Without a template the generator refuses rather than guessing; <code>--allow-minimal</code> writes a synthesised session instead, which your build may decline to open.</p>
+    </section>
+
+    <section id="snapshot">
+      <p class="eyebrow">Feature</p>
+      <h2>A snapshot built from a session</h2>
+      <p>The reverse trip: track names out of a LiveTrax session and onto console channels, with no DAW and no console running.</p>
+      <figure class="shot">
+        <img src="ui-snapshot.png" alt="The WING snapshot tab: a session file to read, mapping options, a template snapshot and output file, and a preview of which channel each track name will be written to.">
+      </figure>
+      <p>A WING <code>.snap</code> is JSON mirroring the console's node tree, so with one as a <strong>template</strong> the output is a genuine, loadable snapshot: the channel names are replaced and nothing else in the file is touched. Names go onto the channel feeding each recorded output, so a track always renames the channel it actually came from.</p>
+      <div class="code"><pre><code>wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow \
+  --template MYSHOW.snap --output USB --out FRIDAY.snap
+
+wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply</code></pre></div>
+      <p>Tracks whose output carries no channel — a bus leg, an unpatched socket — are reported rather than silently dropped. Without a template the file written is node text, one <code>&lt;address&gt; &lt;value&gt;</code> line per channel, which the tool can push to the console itself with <code>--apply</code>.</p>
+    </section>
+
+    <section id="commands">
+      <p class="eyebrow">Reference</p>
+      <h2>Commands</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>(none)</code> / <code>gui</code></td><td>Run the bridge with the window. <code>--tab &lt;name&gt;</code> opens on a given tab.</td></tr>
+            <tr><td><code>run</code></td><td>Run headless, logging to the terminal. <code>-v</code> traces every message.</td></tr>
+            <tr><td><code>patch</code></td><td>Read the output patch from the live console. <code>--groups</code> lists what it answers for.</td></tr>
+            <tr><td><code>snap-info F</code></td><td>Channel names and output patches inside a <code>.snap</code>.</td></tr>
+            <tr><td><code>new-session</code></td><td>Build a LiveTrax session named from the console or from a snapshot.</td></tr>
+            <tr><td><code>wing-snapshot</code></td><td>Console channel names from a session; write a file and/or apply them.</td></tr>
+            <tr><td><code>probe</code></td><td>Print every OSC message received, changing nothing.</td></tr>
+            <tr><td><code>learn</code></td><td>Print ready-to-paste config for whatever console control you touch.</td></tr>
+            <tr><td><code>strips</code></td><td>Ask LiveTrax for its strip list.</td></tr>
+            <tr><td><code>markers</code></td><td>Markers parsed from the session file, with timecode.</td></tr>
+            <tr><td><code>send</code></td><td>Send one OSC message by hand: <code>send --target daw /transport_play i:1</code>.</td></tr>
+            <tr><td><code>init</code></td><td>Write a starter configuration file.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="config">
+      <p class="eyebrow">Reference</p>
+      <h2>Configuration</h2>
+      <p>One TOML file, every protocol detail a knob rather than a constant. An explicit <code>-c</code> wins; otherwise a <code>config.toml</code> in the working directory, then the per-user copy in Application Support.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Section</th><th>Holds</th><th>Worth knowing</th></tr></thead>
+          <tbody>
+            <tr><td><code>[wing]</code></td><td>Host, port, channel count, name address, subscription</td><td><code>name_address</code> takes <code>{ch}</code>; the subscription is renewed on a timer</td></tr>
+            <tr><td><code>[livetrax]</code></td><td>Host, port, surface flags, session file, rename address</td><td><code>feedback</code> and <code>strip_types</code> are Ardour's bitmasks</td></tr>
+            <tr><td><code>[names]</code></td><td>Direction, debounce, length limit, placeholder prefixes</td><td><code>max_len_wing</code> keeps scribble strips readable</td></tr>
+            <tr><td><code>[patch]</code></td><td>Snapshot file or live console, output group</td><td><code>use_for_map</code> makes the patch drive the channel map</td></tr>
+            <tr><td><code>[patch.live]</code></td><td>Addresses and group sizes for querying the desk</td><td>Derived from the <code>.snap</code> tree; confirm with <code>probe</code></td></tr>
+            <tr><td><code>[transport]</code></td><td>Button bindings, LED feedback, per-track arming</td><td>Get the addresses from <code>learn</code></td></tr>
+            <tr><td><code>[scenes]</code></td><td>Scene ↔ marker map, direction, rolling behaviour</td><td><code>add_marker_while_rolling</code> is on by default</td></tr>
+            <tr><td><code>[snapshot]</code></td><td>Node-text line format, address forms, first channel</td><td>Only used when writing without a <code>.snap</code> template</td></tr>
+            <tr><td><code>[map]</code></td><td>Straight channel ↔ strip mapping</td><td>The fallback when no patch is loaded</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="protocol">
+      <p class="eyebrow">Under the hood</p>
+      <h2>Protocol notes</h2>
+      <h3>Two quirks, both handled</h3>
+      <ul>
+        <li>LiveTrax answers <code>/strip/list</code> with an OSC 1.0 <strong><code>#reply</code></strong> packet. That address does not begin with <code>/</code>, so strict OSC decoders reject the datagram outright; the bridge rewrites it to <code>/reply</code> before decoding.</li>
+        <li>Ardour 7+ — so LiveTrax 3 — stores marker positions in the audio time domain as <strong>superclock ticks</strong> (282,240,000 per second) with an <code>a</code> prefix, not samples. Read as samples, a 31-minute marker lands 1,519 hours in. Music-time (<code>b</code>) markers need the tempo map and are skipped with a warning.</li>
+      </ul>
+      <h3>Built on documented behaviour</h3>
+      <ul>
+        <li>LiveTrax inherits Ardour's OSC surface: <code>/set_surface</code>, <code>/strip/list</code>, <code>/strip/name</code>, <code>/transport_play</code>, <code>/locate</code>, <code>/add_marker</code>, <code>/access_action</code>, and <code>/position/samples</code> feedback.</li>
+        <li>Sessions are Ardour-format XML, so <code>&lt;Location … flags="IsMark"&gt;</code> gives marker names and positions.</li>
+        <li>WING serves OSC on 2223, reads a value when a message arrives with no arguments and writes it when arguments are present.</li>
+        <li>A <code>.snap</code> is JSON: <code>ae_data.ch.&lt;n&gt;.name</code>, <code>ae_data.ch.&lt;n&gt;.in.conn</code>, and <code>ae_data.io.out.&lt;GROUP&gt;.&lt;n&gt;</code>. Verified against a real show file from a wing-compact on firmware 3.0.6.</li>
+      </ul>
+      <h3>Worth confirming on your rig</h3>
+      <p>These are configuration, not code, precisely because they vary: the channel-name address, the subscription keep-alive, the scene addresses, your USER button addresses, the <code>[patch.live]</code> addresses, and whether your build honours <code>/strip/name</code> as a setter. <code>learn</code>, <code>probe</code> and <code>patch --groups</code> answer all of them in about two minutes.</p>
+    </section>
+
+    <section id="trouble">
+      <p class="eyebrow">When it misbehaves</p>
+      <h2>Troubleshooting</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="chip bad">LiveTrax silent</span></td>
+              <td>The OSC surface is off, or the port differs</td>
+              <td>Preferences → Control Surfaces → OSC; check <code>livetrax.port</code>, then <code>strips</code></td>
+            </tr>
+            <tr>
+              <td><span class="chip bad">WING silent</span></td>
+              <td>Wrong host, or macOS has not been granted local network access</td>
+              <td>Check <code>wing.host</code>; allow the app under Privacy &amp; Security → Local Network; then <code>probe --target wing</code></td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Names go nowhere</span></td>
+              <td>The build does not accept <code>/strip/name</code> as a setter</td>
+              <td>Watch for the warning in the log, then set <code>direction = "daw-to-wing"</code></td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Names on the wrong tracks</span></td>
+              <td>Mapped by channel number rather than through the patch</td>
+              <td>Load the output patch and pick the group the DAW records</td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Patch query answers nothing</span></td>
+              <td>Firmware uses different node addresses</td>
+              <td><code>patch --groups</code> to confirm, <code>probe</code> to see the real addresses, then edit <code>[patch.live]</code></td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Scene recall does nothing</span></td>
+              <td><code>scenes.scene_address</code> does not match your firmware</td>
+              <td><code>learn</code>, recall a scene, paste what it prints</td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Markers are missing</span></td>
+              <td>Made since the last save, or music-time</td>
+              <td>Save the session, then <em>Reload session file</em></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="build">
+      <p class="eyebrow">For the repo</p>
+      <h2>Build and package</h2>
+      <div class="code"><pre><code>cargo test                                          <span class="c"># unit tests</span>
+python3 tests/e2e.py ./target/debug/wing-livetrax-bridge
+python3 tests/session_gen.py ./target/debug/wing-livetrax-bridge
+python3 tests/live_patch.py ./target/debug/wing-livetrax-bridge
+packaging/bundle.sh --dmg                           <span class="c"># dist/</span></code></pre></div>
+      <p>The three Python harnesses stand up fake consoles and a fake DAW on loopback, so the whole feature set is exercised without hardware: name sync both ways, transport and LED feedback, scene ↔ marker linking, the generated session XML, and the live patch query.</p>
+      <footer>
+        <p>WING LiveTrax Bridge v0.1.0 · MIT · Behringer, WING, Harrison and LiveTrax are trademarks of their respective owners; this is an independent tool.</p>
+      </footer>
+    </section>
+  </main>
+</div>
+
+<script>
+// Mark the section being read in the rail.
+const links = new Map([...document.querySelectorAll('.rail a')].map(a => [a.getAttribute('href').slice(1), a]));
+const seen = new Set();
+const observer = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) seen.add(entry.target.id); else seen.delete(entry.target.id);
+  }
+  const order = [...links.keys()];
+  const current = order.find(id => seen.has(id));
+  for (const [id, link] of links) link.toggleAttribute('aria-current', id === current);
+}, { rootMargin: '-10% 0px -70% 0px' });
+document.querySelectorAll('main section').forEach(s => observer.observe(s));
+
+// Copy buttons on the command blocks.
+document.querySelectorAll('.code').forEach(block => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Copy';
+  button.addEventListener('click', async () => {
+    const text = block.querySelector('code').innerText;
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = 'Copied';
+    } catch {
+      button.textContent = 'Press Cmd-C';
+    }
+    setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+  });
+  block.appendChild(button);
+});
+</script>
+</body>
+</html>

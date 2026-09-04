@@ -26,13 +26,26 @@ the console's network, or on a separate box.
         ◄─────────────────                       ◄─────────────────
 ```
 
+## Documentation
+
+Full documentation lives in [`docs/`](docs/index.html) — open it locally, or
+serve the folder with GitHub Pages. `python3 docs/build_site.py` bundles the
+same page into a single self-contained file.
+
 ## Build
 
 ```bash
-cargo build --release
+cargo build --release          # target/release/wing-livetrax-bridge
+packaging/bundle.sh            # dist/WING LiveTrax Bridge.app
+packaging/bundle.sh --dmg      # ...and a disk image beside it
 ```
 
-The binary lands in `target/release/wing-livetrax-bridge`.
+The app and the CLI are one binary: run it with no arguments for the window, or
+with a subcommand for the terminal. A double-clicked app has no useful working
+directory, so it reads (and on first run writes) its configuration at
+`~/Library/Application Support/WING LiveTrax Bridge/config.toml`; an explicit
+`-c` always wins, and a `config.toml` in the working directory is preferred when
+there is one.
 
 ## Set up
 
@@ -77,7 +90,7 @@ full trace of both directions.
 
 ## The GUI
 
-![Channels tab](docs/gui-channels.png)
+![Channels tab](docs/ui-channels.png)
 
 Running with no subcommand (or `gui`) opens the front end. The bridge itself
 runs on a background thread; the window is a view onto it, so closing dialogs or
@@ -102,6 +115,8 @@ switching tabs never interrupts sync.
 
 **New session** builds a session folder whose tracks carry the console's channel
 names, in channel order.
+
+![New session](docs/ui-session.png)
 
 It works by **cloning a track out of a template session**: pick any session (or
 `.template`) that your own LiveTrax wrote and contains at least one audio track,
@@ -142,7 +157,7 @@ tell LiveTrax to load it.
 
 ## Which output feeds the DAW
 
-![Output selector](docs/gui-output-patch.png)
+
 
 A WING records through one port group — USB, the card, AES50 — and that group's
 **output patch** decides which source lands on which track. It is rarely channel
@@ -158,8 +173,6 @@ in the header of the **Channels** tab (or with `patch.source` in the config):
 * **from the console itself** — press *Ask the console* and the bridge queries
   the live patch over OSC, so it always matches what the desk is doing right
   now. With `source = "console"` it asks automatically at startup.
-
-![Live patch](docs/gui-live-patch.png)
 
 The snapshot dropdown makes the group feeding the DAW obvious:
 
@@ -238,6 +251,8 @@ refresh) is ignored, so the playhead does not jump on a timer; set
 `retrigger_same_scene = true` if you want a deliberate re-recall of the *same*
 scene to act again.
 
+![Scenes and markers](docs/ui-scenes.png)
+
 * **Reverse** — with `direction = "marker-to-scene"` (or `bidirectional`),
   passing a mapped marker recalls the matching scene on the console. A recall
   the bridge itself caused is not echoed back.
@@ -256,7 +271,7 @@ of a session file — no DAW running, no console attached — lays them across
 console channels, and either writes a file or pushes the names to the console
 over OSC.
 
-![WING snapshot tab](docs/gui-snapshot.png)
+![WING snapshot tab](docs/ui-snapshot.png)
 
 A WING `.snap` is JSON mirroring the console's node tree, so with one as a
 **template** the output is a genuine, loadable snapshot: the channel names are

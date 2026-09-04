@@ -297,10 +297,10 @@ fn main() -> Result<()> {
 
 /// Where the configuration lives.
 ///
-/// A path on the command line always wins. Otherwise a `config.toml` beside the
-/// working directory is used when there is one - the way the CLI is usually run
-/// - and failing that the per-user copy, which is created from the bundled
-/// example the first time the app is opened.
+/// A path on the command line always wins. Otherwise a `config.toml` in the
+/// working directory is used when there is one, which is how the CLI is usually
+/// run. Failing that it is the per-user copy, created from the bundled example
+/// the first time the app is opened.
 fn resolve_config(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
