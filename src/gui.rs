@@ -7,9 +7,10 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::{Action, Config, Direction, PatchSource};
+use crate::config::{Action, Config, PatchSource};
 use crate::session::{self, SessionRequest};
 use crate::patch::OutputGroup;
+use crate::prefs::Prefs;
 use crate::snapfile::SnapFile;
 use crate::snapshot::{self, SnapshotRequest};
 use crate::shared::{Command, CommandTx, LogBuffer, Shared, Snapshot};
@@ -35,8 +36,13 @@ pub fn run(
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let mut app = App::new(shared, tx, log, cfg, cfg_path);
     if let Some(tab) = start_tab {
-        app.tab = Tab::from_name(tab)
-            .with_context(|| format!("unknown tab {tab:?}"))?;
+        // "preferences" opens the window rather than switching tabs.
+        if tab.eq_ignore_ascii_case("preferences") || tab.eq_ignore_ascii_case("prefs") {
+            let config = app.cfg.clone();
+            app.prefs.open_with(&config);
+        } else {
+            app.tab = Tab::from_name(tab).with_context(|| format!("unknown tab {tab:?}"))?;
+        }
     }
     eframe::run_native(
         "WING <-> LiveTrax Bridge",
@@ -57,7 +63,6 @@ enum Tab {
     NewSession,
     Snapshot,
     Log,
-    Settings,
 }
 
 impl Tab {
@@ -69,7 +74,6 @@ impl Tab {
             "newsession" => Tab::NewSession,
             "snapshot" => Tab::Snapshot,
             "log" => Tab::Log,
-            "settings" => Tab::Settings,
             _ => return None,
         })
     }
@@ -226,6 +230,9 @@ struct App {
     form: SessionForm,
     snap_form: SnapForm,
     patch_form: PatchForm,
+    /// The "go to timecode" entry.
+    tc_input: String,
+    prefs: Prefs,
     snap: Snapshot,
 }
 
@@ -241,6 +248,8 @@ impl App {
             form: SessionForm::new(&cfg),
             snap_form: SnapForm::new(&cfg),
             patch_form: PatchForm::new(&cfg),
+            tc_input: String::new(),
+            prefs: Prefs::new(&cfg),
             shared,
             tx,
             log,
@@ -291,6 +300,17 @@ impl eframe::App for App {
             self.snap = s.clone();
         }
 
+        // Cmd-, is the preferences shortcut everywhere else on this platform.
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.prefs.open_with(&self.cfg);
+        }
+        for command in self.prefs.show(ui.ctx(), &self.cfg_path) {
+            if let Command::ApplyConfig(config) = &command {
+                self.cfg = (**config).clone();
+            }
+            self.send(command);
+        }
+
         egui::Panel::top("header")
             .frame(bar_frame())
             .show(ui, |ui| self.header(ui));
@@ -312,7 +332,6 @@ impl eframe::App for App {
                         Tab::NewSession => self.session_tab(ui),
                         Tab::Snapshot => self.snapshot_tab(ui),
                         Tab::Log => self.log_tab(ui),
-                        Tab::Settings => self.settings_tab(ui),
                     });
             });
     }
@@ -349,11 +368,19 @@ impl App {
 
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(timecode(self.snap.position, self.snap.sample_rate))
-                    .monospace()
-                    .size(15.0)
-                    .color(if rolling { GREEN } else { TEXT }),
+                egui::RichText::new(
+                    self.snap
+                        .timecode
+                        .clone()
+                        .unwrap_or_else(|| timecode(self.snap.position, self.snap.sample_rate)),
+                )
+                .monospace()
+                .size(16.0)
+                .color(if rolling { GREEN } else { TEXT }),
             );
+            if !self.snap.fps.is_empty() {
+                ui.label(egui::RichText::new(format!("{} fps", self.snap.fps)).small().color(DIM));
+            }
 
             if let Some(marker) = self.snap.current_marker.clone() {
                 chip(ui, &format!("marker  {marker}"));
@@ -361,6 +388,11 @@ impl App {
             if let Some(scene) = self.snap.current_scene {
                 chip(ui, &format!("scene  {scene}"));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Preferences").clicked() {
+                    self.prefs.open_with(&self.cfg);
+                }
+            });
         });
     }
 
@@ -374,7 +406,6 @@ impl App {
                 (Tab::NewSession, "New session"),
                 (Tab::Snapshot, "WING snapshot"),
                 (Tab::Log, "Log"),
-                (Tab::Settings, "Settings"),
             ] {
                 let selected = self.tab == tab;
                 let text = egui::RichText::new(label).color(if selected { TEXT } else { DIM });
@@ -668,6 +699,46 @@ impl App {
         });
         ui.add_space(10.0);
 
+        theme::titled_card(ui, "GO TO TIMECODE", |ui| {
+            ui.horizontal(|ui| {
+                let entry = ui.add(
+                    egui::TextEdit::singleline(&mut self.tc_input)
+                        .hint_text("01:02:03:04")
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(140.0),
+                );
+                let submitted = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let parsed = crate::timecode::Timecode::parse(&self.tc_input);
+                let go = ui.add_enabled(parsed.is_some(), theme::primary("Go")).clicked();
+                if (go || submitted) && parsed.is_some() {
+                    self.send(Command::LocateTimecode(self.tc_input.clone()));
+                }
+                if ui.button("From playhead").clicked() {
+                    self.tc_input = self
+                        .snap
+                        .timecode
+                        .clone()
+                        .unwrap_or_default()
+                        .replace(';', ":");
+                }
+                if !self.tc_input.trim().is_empty() && parsed.is_none() {
+                    ui.label(
+                        egui::RichText::new("hours:minutes:seconds:frames").small().color(AMBER),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "at {} fps, {} Hz",
+                            self.snap.fps, self.snap.sample_rate
+                        ))
+                        .small()
+                        .color(DIM),
+                    );
+                }
+            });
+        });
+        ui.add_space(10.0);
+
         theme::titled_card(ui, "SEND TO LIVETRAX", |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (label, action) in [
@@ -687,6 +758,67 @@ impl App {
                     }
                 }
             });
+        });
+        ui.add_space(10.0);
+        self.cue_log(ui);
+    }
+
+    /// The show log: what happened, and at what timecode.
+    fn cue_log(&mut self, ui: &mut egui::Ui) {
+        theme::titled_card(ui, &format!("SHOW LOG ({})", self.snap.cues.len()), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Export CSV").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("show-log.csv")
+                        .add_filter("CSV", &["csv"])
+                        .save_file()
+                    {
+                        self.send(Command::ExportCues(path));
+                    }
+                }
+                if ui.button("Clear").clicked() {
+                    self.send(Command::ClearCues);
+                }
+                ui.label(
+                    egui::RichText::new("markers, scene recalls and takes, stamped with timecode")
+                        .small()
+                        .color(DIM),
+                );
+            });
+            ui.add_space(4.0);
+            if self.snap.cues.is_empty() {
+                theme::empty(ui, "Nothing logged yet - drop a marker or recall a scene.");
+                return;
+            }
+            egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(
+                ui,
+                |ui| {
+                    egui::Grid::new("cues").num_columns(3).striped(true).spacing([12.0, 4.0]).show(
+                        ui,
+                        |ui| {
+                            theme::column(ui, "TIMECODE");
+                            theme::column(ui, "WHAT");
+                            theme::column(ui, "DETAIL");
+                            ui.end_row();
+                            for cue in self.snap.cues.iter().rev() {
+                                theme::num(ui, cue.timecode.clone());
+                                ui.label(
+                                    egui::RichText::new(cue.kind.label()).small().color(
+                                        match cue.kind {
+                                            crate::shared::CueKind::TakeStart => GREEN,
+                                            crate::shared::CueKind::TakeStop => DIM,
+                                            crate::shared::CueKind::Scene => ACCENT,
+                                            crate::shared::CueKind::Marker => TEXT,
+                                        },
+                                    ),
+                                );
+                                cell(ui, 260.0, egui::RichText::new(&cue.detail).color(TEXT));
+                                ui.end_row();
+                            }
+                        },
+                    );
+                },
+            );
         });
     }
 
@@ -1227,88 +1359,6 @@ impl App {
         });
     }
 
-    fn settings_tab(&mut self, ui: &mut egui::Ui) {
-        theme::titled_card(ui, "SYNC", |ui| {
-            let mut names_enabled = self.snap.names_enabled;
-            if ui.checkbox(&mut names_enabled, "Channel name sync").changed() {
-                self.send(Command::SetNamesEnabled(names_enabled));
-            }
-            ui.horizontal(|ui| {
-                theme::field(ui, "Direction");
-                let mut dir = self.snap.names_direction;
-                for (value, label) in [
-                    (Direction::WingToDaw, "console -> DAW"),
-                    (Direction::DawToWing, "DAW -> console"),
-                    (Direction::Bidirectional, "both"),
-                ] {
-                    if ui.selectable_value(&mut dir, value, label).clicked() {
-                        self.send(Command::SetNamesDirection(value));
-                    }
-                }
-            });
-            let mut scenes_enabled = self.snap.scenes_enabled;
-            if ui.checkbox(&mut scenes_enabled, "Scene <-> marker linking").changed() {
-                self.send(Command::SetScenesEnabled(scenes_enabled));
-            }
-        });
-        ui.add_space(10.0);
-
-        theme::titled_card(ui, "CONNECTIONS", |ui| {
-            ui.label(
-                egui::RichText::new("Hosts, ports and addresses live in the config file; edit it and restart.")
-                    .small()
-                    .color(DIM),
-            );
-            ui.add_space(4.0);
-            for (label, value) in [
-                ("Console", format!("{}:{}", self.cfg.wing.host, self.cfg.wing.port)),
-                ("LiveTrax", format!("{}:{}", self.cfg.livetrax.host, self.cfg.livetrax.port)),
-                ("Channel name address", self.cfg.wing.name_address.clone()),
-                ("Scene address", self.cfg.scenes.scene_address.clone()),
-            ] {
-                ui.horizontal(|ui| {
-                    theme::field(ui, label);
-                    ui.label(egui::RichText::new(value).monospace().color(TEXT));
-                });
-            }
-            ui.horizontal(|ui| {
-                theme::field(ui, "Session file");
-                ui.label(
-                    egui::RichText::new(
-                        self.snap
-                            .session_file
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "-".into()),
-                    )
-                    .monospace()
-                    .color(TEXT),
-                );
-                if ui.small_button("Choose").clicked() {
-                    if let Some(file) = rfd::FileDialog::new()
-                        .add_filter("LiveTrax session", &["ardour"])
-                        .pick_file()
-                    {
-                        self.send(Command::SetSessionFile(file));
-                    }
-                }
-            });
-        });
-        ui.add_space(10.0);
-
-        theme::titled_card(ui, "CONFIG FILE", |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Save settings to the config file").clicked() {
-                    self.send(Command::SaveConfig(self.cfg_path.clone()));
-                }
-                ui.label(
-                    egui::RichText::new("Rewrites the TOML from what is running; comments are lost.")
-                        .small()
-                        .color(DIM),
-                );
-            });
-        });
-    }
 }
 
 // ---------------------------------------------------------- helpers --------

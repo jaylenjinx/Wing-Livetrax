@@ -270,10 +270,12 @@ footer { border-top: 1px solid var(--edge); margin-top: 40px; padding-top: 18px;
       <li><a href="#names">Channel names</a></li>
       <li><a href="#transport">Transport</a></li>
       <li><a href="#scenes">Scenes &amp; markers</a></li>
+      <li><a href="#timecode">Timecode</a></li>
       <li><a href="#session">Session from console</a></li>
       <li><a href="#snapshot">Snapshot from session</a></li>
       <li><a href="#commands">Command reference</a></li>
-      <li><a href="#config">Configuration</a></li>
+      <li><a href="#prefs">Preferences</a></li>
+      <li><a href="#config">Configuration file</a></li>
       <li><a href="#protocol">Protocol notes</a></li>
       <li><a href="#trouble">Troubleshooting</a></li>
       <li><a href="#build">Build &amp; package</a></li>
@@ -321,6 +323,7 @@ footer { border-top: 1px solid var(--edge); margin-top: 40px; padding-top: 18px;
         <li><strong>Sessions</strong> can be built from the console's channel list, tracks named and in the right order.</li>
         <li><strong>Snapshots</strong> go the other way: a LiveTrax session's track names written into a real <code>.snap</code>.</li>
         <li><strong>Everything maps through the console's own output patch</strong>, read from a snapshot file or queried live.</li>
+        <li><strong>Timecode</strong> is read from the DAW, typed into to locate, stamped onto markers, and logged for the edit.</li>
       </ul>
     </section>
 
@@ -444,6 +447,31 @@ action = { locate_marker = "Song 3" }</code></pre></div>
       <p class="small">A scene index the console re-reports (which it does on every subscription refresh) is ignored, so the playhead does not jump on a timer. Set <code>retrigger_same_scene</code> if you want a deliberate re-recall of the same scene to act again.</p>
     </section>
 
+    <section id="timecode">
+      <p class="eyebrow">Feature</p>
+      <h2>Timecode</h2>
+      <p>The header carries the DAW's own SMPTE clock. LiveTrax publishes it as <code>/position/smpte</code> once the <em>timecode</em> feedback bit is on; when it is not sending timecode the bridge works the clock out from the playhead instead, so the display never goes blank.</p>
+      <figure class="shot">
+        <img src="ui-transport.png" alt="The Transport tab: a go-to-timecode field, the transport actions, and a show log listing markers and scene recalls against their timecode.">
+        <figcaption>Type a timecode to locate there; below, the show log builds itself as the session runs.</figcaption>
+      </figure>
+      <p>Frame rate and session start come from the session file itself — <code>timecode-format</code> and <code>timecode-offset</code> — so 29.97 drop-frame behaves like 29.97 drop-frame rather than like 30. The arithmetic accounts for it: the 29.97 and 59.94 rates run 1000/1001 slow, and their drop-frame variants skip frame numbers in nine minutes out of ten.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>What</th><th>Where</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Playhead in SMPTE</td><td>Header</td><td>The DAW's own string, with the frame rate beside it</td></tr>
+            <tr><td>Go to timecode</td><td>Transport tab</td><td><code>01:02:03:04</code>, or <code>;</code> for drop-frame</td></tr>
+            <tr><td>Timecode-named markers</td><td><code>timecode.marker_template</code></td><td><code>{tc}</code>, <code>{samples}</code>, <code>{n}</code></td></tr>
+            <tr><td>Show log</td><td>Transport tab</td><td>Markers, scene recalls, optionally takes — export as CSV</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <p>The show log is the take sheet you would otherwise scribble: every marker and scene recall with the timecode it happened at, ready for whoever edits the recording.</p>
+      </div>
+    </section>
+
     <section id="session">
       <p class="eyebrow">Feature</p>
       <h2>A session built from the console</h2>
@@ -499,9 +527,20 @@ wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply</co
       </div>
     </section>
 
+    <section id="prefs">
+      <p class="eyebrow">Reference</p>
+      <h2>Preferences</h2>
+      <p>Everything the configuration file holds is editable in the app: <strong>Preferences</strong> in the header, or <kbd>Cmd-,</kbd>.</p>
+      <figure class="shot">
+        <img src="ui-prefs.png" alt="The Preferences window: a section list down the left - console, LiveTrax, names, recorded output, transport, scenes, timecode, snapshots, manual map - with labelled fields and short hints on the right.">
+      </figure>
+      <p>Edits go into a draft, so a half-typed address never reaches the console. <strong>Apply</strong> hands the whole configuration to the running bridge, which takes on everything except the sockets themselves; <strong>Save to file</strong> also writes the TOML. Hosts and ports need a restart, and the window says so rather than pretending otherwise.</p>
+      <p>Ardour's <code>strip_types</code> and <code>feedback</code> bitmasks appear as named checkboxes — "timecode", "playhead in samples", "heartbeat" — instead of a number to look up.</p>
+    </section>
+
     <section id="config">
       <p class="eyebrow">Reference</p>
-      <h2>Configuration</h2>
+      <h2>Configuration file</h2>
       <p>One TOML file, every protocol detail a knob rather than a constant. An explicit <code>-c</code> wins; otherwise a <code>config.toml</code> in the working directory, then the per-user copy in Application Support.</p>
       <div class="table-wrap">
         <table>
@@ -515,6 +554,7 @@ wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply</co
             <tr><td><code>[transport]</code></td><td>Button bindings, LED feedback, per-track arming</td><td>Get the addresses from <code>learn</code></td></tr>
             <tr><td><code>[scenes]</code></td><td>Scene ↔ marker map, direction, rolling behaviour</td><td><code>add_marker_while_rolling</code> is on by default</td></tr>
             <tr><td><code>[snapshot]</code></td><td>Node-text line format, address forms, first channel</td><td>Only used when writing without a <code>.snap</code> template</td></tr>
+            <tr><td><code>[timecode]</code></td><td>Frame rate, session start, marker naming, the show log</td><td>Frame rate follows the session unless pinned</td></tr>
             <tr><td><code>[map]</code></td><td>Straight channel ↔ strip mapping</td><td>The fallback when no patch is loaded</td></tr>
           </tbody>
         </table>
@@ -576,6 +616,11 @@ wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply</co
               <td><span class="chip warn">Scene recall does nothing</span></td>
               <td><code>scenes.scene_address</code> does not match your firmware</td>
               <td><code>learn</code>, recall a scene, paste what it prints</td>
+            </tr>
+            <tr>
+              <td><span class="chip warn">Timecode reads 00:00:00:00</span></td>
+              <td>LiveTrax is not sending timecode feedback</td>
+              <td>Turn on the "timecode" feedback bit in Preferences → LiveTrax; until then the clock is calculated from the playhead</td>
             </tr>
             <tr>
               <td><span class="chip warn">Markers are missing</span></td>

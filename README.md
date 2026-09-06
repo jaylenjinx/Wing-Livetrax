@@ -17,6 +17,9 @@ OSC:
   names into a real `.snap`, with no console or DAW running.
 * **Recorded-output selector** — names follow the console's own output patch,
   so track 14 gets the name of whatever the desk actually sends on output 14.
+* **Timecode** — the DAW's SMPTE clock, locate-by-timecode, timecode-named
+  markers, and a show log you can export as CSV.
+* **Preferences** — every setting in the file is editable in the app.
 
 Both ends are plain UDP OSC, so the bridge can run on the LiveTrax machine, on
 the console's network, or on a separate box.
@@ -301,6 +304,36 @@ the report lists any channel the template had no line for.
 wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --out myshow-wing.txt --max-len 8
 wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply
 ```
+
+## Timecode
+
+The header shows the DAW's own SMPTE clock — LiveTrax sends it as
+`/position/smpte` once the *timecode* feedback bit is on — with the frame rate
+beside it. When the DAW is not sending timecode, the bridge works it out from
+the playhead instead.
+
+The frame rate and session start come from the session file
+(`timecode-format`, `timecode-offset`), so 29.97 drop-frame behaves like
+29.97 drop-frame; `[timecode] fps` and `offset` override them when you need to.
+
+* **Go to timecode** — type one into the Transport tab and the transport
+  locates there. Drop-frame is accepted with either separator.
+* **Timecode-named markers** — a marker dropped by the bridge is named from
+  `timecode.marker_template`, `{tc}` by default.
+* **Show log** — markers, scene recalls and (optionally) takes, each stamped
+  with the timecode they happened at, exportable as CSV for the edit.
+
+## Preferences
+
+Everything in the config file is editable in the app: **Preferences** in the
+header, or Cmd-, — console, LiveTrax, names, the recorded output and its live
+query addresses, transport bindings, scenes, timecode, snapshots and the manual
+map. Ardour's `strip_types` and `feedback` bitmasks are named checkboxes rather
+than numbers.
+
+*Apply* hands the whole configuration to the running bridge, which takes on
+everything except the sockets themselves; *Save to file* also writes the TOML.
+Hosts and ports need a restart, and the window says so.
 
 ## Commands
 

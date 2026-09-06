@@ -32,7 +32,7 @@ query_with_empty_args = true # WING/X32 convention: no args = "tell me the value
 # -------------------------------------------------------------- LiveTrax ---
 [livetrax]
 host = "127.0.0.1"           # 127.0.0.1 when the bridge runs on the LiveTrax PC
-port = 3819                  # LiveTrax/Ardour OSC port
+port = 3821                  # LiveTrax/Ardour OSC port
 local_port = 3820            # fixed local port keeps firewall rules simple
 
 # /set_surface parameters.
@@ -193,3 +193,20 @@ name_paths = ["/ch/{ch}/name", "ch.{ch}/name", "/ch.{ch}/name"]
 include_comments = true   # write a "#" header into node-text files
 first_channel = 1         # console channel the session's first track maps to
 include_busses = false    # busses as well as tracks
+
+# ------------------------------------------------------------- timecode ---
+# Everything here can also be set in the app: Preferences > Timecode.
+[timecode]
+# Frame rate. Leave it out to follow the session file's own setting.
+# fps = "29.97df"          # 23.976 | 24 | 25 | 29.97 | 29.97df | 30 | 30df | 59.94 | 59.94df | 60
+
+# Session start. Leave it out to use the offset the session file carries.
+# offset = "10:00:00:00"
+
+# Name given to markers the bridge drops. {tc} the timecode, {samples} the
+# playhead, {n} a running count. Empty leaves them unnamed.
+marker_template = "{tc}"
+
+log = true                 # keep a timecode-stamped show log
+log_transport = false      # log takes starting and stopping as well
+log_limit = 2000

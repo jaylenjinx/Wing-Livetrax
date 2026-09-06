@@ -29,6 +29,10 @@ pub struct Snapshot {
     pub markers: Vec<(String, i64)>,
     pub scene_map: Vec<(i32, String)>,
     pub sample_rate: f64,
+    /// Playhead as the DAW reports it in SMPTE, when it is sending timecode.
+    pub timecode: Option<String>,
+    pub fps: String,
+    pub cues: Vec<Cue>,
     pub playing: bool,
     pub recording: bool,
     pub position: i64,
@@ -57,6 +61,34 @@ pub struct Snapshot {
     pub session_busy: bool,
 }
 
+/// One line of the show log: what happened, and where.
+#[derive(Debug, Clone)]
+pub struct Cue {
+    pub timecode: String,
+    pub samples: i64,
+    pub kind: CueKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CueKind {
+    Marker,
+    Scene,
+    TakeStart,
+    TakeStop,
+}
+
+impl CueKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CueKind::Marker => "marker",
+            CueKind::Scene => "scene",
+            CueKind::TakeStart => "roll",
+            CueKind::TakeStop => "stop",
+        }
+    }
+}
+
 /// Requests from the GUI to the bridge.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -69,13 +101,16 @@ pub enum Command {
     /// Push every known DAW name to the console.
     PushNamesToWing,
     Transport(Action),
+    /// Locate to a typed timecode, e.g. "01:02:03:04".
+    LocateTimecode(String),
+    ExportCues(PathBuf),
+    ClearCues,
+    /// Replace the whole configuration, from the preferences window.
+    ApplyConfig(Box<crate::config::Config>),
     RecallScene(i32),
     LocateMarker(String),
     ReloadSession,
-    SetNamesEnabled(bool),
-    SetNamesDirection(Direction),
     SetScenesEnabled(bool),
-    SetSessionFile(PathBuf),
     /// Choose the console output the DAW records, and the snapshot to read it
     /// from. A `None` file drops back to the configured [map].
     SetPatch { snap_file: Option<PathBuf>, output_group: Option<String> },

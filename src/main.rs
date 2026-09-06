@@ -8,10 +8,12 @@ mod markers;
 mod osc;
 mod session;
 mod patch;
+mod prefs;
 mod shared;
 mod snapfile;
 mod snapshot;
 mod theme;
+mod timecode;
 mod wing;
 
 use anyhow::{Context, Result};
@@ -50,7 +52,7 @@ enum Cmd {
     /// Run the bridge with the graphical front end (the default).
     Gui {
         /// Open on a specific tab: channels, transport, scenes, new-session,
-        /// snapshot, log, settings.
+        /// snapshot, log - or "preferences" for the settings window.
         #[arg(long)]
         tab: Option<String>,
         /// Place the window at "x,y" instead of letting the OS choose.
@@ -656,12 +658,27 @@ fn cmd_markers(path: &std::path::Path) -> Result<()> {
         anyhow::bail!("set livetrax.session_file in {} first", path.display());
     };
     let file = markers::resolve_session_path(raw)?;
-    let (list, sr) = markers::parse_session(&file)?;
-    println!("{} ({} markers, sample rate {})", file.display(), list.len(), sr.unwrap_or_default());
-    let rate = sr.unwrap_or(cfg.livetrax.sample_rate).max(1.0);
-    println!("{:>14}  {:>12}  name", "samples", "time");
-    for m in &list {
-        println!("{:>14}  {:>12}  {}", m.start, hms(m.start as f64 / rate), m.name);
+    let info = markers::parse_session(&file)?;
+    let rate = info.sample_rate.unwrap_or(cfg.livetrax.sample_rate).max(1.0);
+    let fps = cfg.timecode.fps.or(info.fps).unwrap_or_default();
+    let offset_frames =
+        (info.offset_samples as f64 / rate * fps.rate()).round() as i64;
+    println!(
+        "{} ({} markers, {} Hz, timecode {})",
+        file.display(),
+        info.markers.len(),
+        rate,
+        fps.label()
+    );
+    println!("{:>14}  {:>12}  {:>12}  name", "samples", "time", "timecode");
+    for m in &info.markers {
+        println!(
+            "{:>14}  {:>12}  {:>12}  {}",
+            m.start,
+            hms(m.start as f64 / rate),
+            timecode::from_samples(m.start, rate, fps, offset_frames),
+            m.name
+        );
     }
     Ok(())
 }

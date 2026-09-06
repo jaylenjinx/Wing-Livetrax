@@ -92,6 +92,10 @@ port = 13819
 local_port = 13820
 session_file = "{session}"
 refresh_interval_ms = 2000
+add_marker_takes_name = true
+
+[timecode]
+fps = "30"
 
 [names]
 enabled = true
@@ -106,6 +110,9 @@ action = "toggle_play"
 [[transport.buttons]]
 address = "/$ctl/user/1/bu/2"
 action = {{ locate_marker = "Song 1" }}
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/3"
+action = "add_marker"
 [[transport.leds]]
 source = "playing"
 address = "/$ctl/user/1/bu/1/led"
@@ -200,13 +207,20 @@ def main():
     check("marker -> scene recall", wing.expect("/$ctl/lib/$action",
           pred=lambda a: a[:1] == [1]) is not None)
 
-    # 9. Scene recall while rolling drops a marker instead of jumping.
+    # 9. A marker dropped by the bridge is named with the DAW's own timecode.
+    daw.send("/position/smpte", "01:00:05:00")
+    time.sleep(0.3)
+    wing.send("/$ctl/user/1/bu/3", 1.0)
+    check("marker named from the DAW's timecode",
+          daw.expect("/add_marker", pred=lambda a: a[:1] == ["01:00:05:00"]) is not None)
+
+    # 10. Scene recall while rolling drops a marker instead of jumping.
     daw.send("/transport_play", 1)
     time.sleep(0.3)
     wing.send("/$ctl/lib/$actidx", 2)
     check("scene while rolling -> add marker", daw.expect("/add_marker") is not None)
 
-    # 10. A repeated scene index (subscription refresh) must not act again.
+    # 11. A repeated scene index (subscription refresh) must not act again.
     time.sleep(0.3)
     wing.send("/$ctl/lib/$actidx", 2)
     check("repeated scene index ignored", daw.expect("/add_marker", timeout=1.0) is None)

@@ -117,11 +117,15 @@ pub fn primary(text: &str) -> egui::Button<'static> {
         .fill(ACCENT)
 }
 
-/// A left-hand form label of consistent width.
+/// A form label of consistent width, set against its field the way a
+/// preferences pane does: right-aligned, so the controls line up.
 pub fn field(ui: &mut Ui, label: &str) {
-    ui.add_sized(
-        [138.0, 20.0],
-        egui::Label::new(egui::RichText::new(label).color(DIM)).halign(egui::Align::LEFT),
+    ui.allocate_ui_with_layout(
+        Vec2::new(150.0, 20.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(label).color(DIM)).truncate());
+        },
     );
 }
 

@@ -13,7 +13,8 @@ use crate::livetrax::Daw;
 use crate::markers::{self, MarkerTable};
 use crate::osc::{self, Incoming};
 use crate::session;
-use crate::shared::{Command, CommandRx, Shared};
+use crate::shared::{Command, CommandRx, Cue, CueKind, Shared};
+use crate::timecode::{self, Fps};
 use crate::patch::PatchModel;
 use crate::snapfile::SnapFile;
 use crate::wing::Wing;
@@ -96,6 +97,12 @@ struct State {
     current_marker: Option<String>,
     last_scene_locate: Option<Instant>,
     strip_list_seen: bool,
+    /// Timecode as the DAW reports it, and the session's own frame rate.
+    timecode: Option<String>,
+    session_fps: Option<crate::timecode::Fps>,
+    session_offset_samples: i64,
+    markers_dropped: usize,
+    cues: Vec<crate::shared::Cue>,
     last_wing_rx: Option<Instant>,
     last_daw_rx: Option<Instant>,
     wing_msgs: u64,
@@ -403,6 +410,7 @@ impl Bridge {
             tracing::info!("scene {idx} while rolling -> marker \"{}\"", entry.marker);
             self.daw.add_marker(Some(&entry.marker)).await?;
             self.markers.observe(&entry.marker, self.st.position);
+            self.log_cue(CueKind::Scene, format!("scene {idx}: {}", entry.marker));
             return Ok(());
         }
 
@@ -416,6 +424,7 @@ impl Bridge {
                 );
                 self.st.last_scene_locate = Some(Instant::now());
                 self.daw.locate(start, self.cfg.scenes.locate_and_play).await?;
+                self.log_cue(CueKind::Scene, format!("scene {idx}: {}", entry.marker));
             }
             None => {
                 tracing::warn!(
@@ -457,6 +466,15 @@ impl Bridge {
             "/position/samples" => {
                 if let Some(p) = args.first().and_then(osc::as_i64) {
                     self.st.position = p;
+                }
+            }
+            // Sent when the surface asks for timecode feedback (bit 64).
+            "/position/smpte" | "/position/timecode" => {
+                if let Some(tc) = args.first().and_then(osc::as_str) {
+                    let tc = tc.trim();
+                    if !tc.is_empty() {
+                        self.st.timecode = Some(tc.to_string());
+                    }
                 }
             }
             "/marker" => {
@@ -544,6 +562,7 @@ impl Bridge {
         }
         self.markers.observe(&name, self.st.position);
         self.st.current_marker = Some(name.clone());
+        self.log_cue(CueKind::Marker, name.clone());
 
         if !(self.cfg.scenes.enabled && self.cfg.scenes.direction.marker_to_scene()) {
             return Ok(());
@@ -585,6 +604,11 @@ impl Bridge {
         }
         self.st.playing = on;
         tracing::info!("transport: {}", if on { "rolling" } else { "stopped" });
+        if self.cfg.timecode.log_transport {
+            let kind = if on { CueKind::TakeStart } else { CueKind::TakeStop };
+            let detail = if self.st.recording { "recording" } else { "playback" };
+            self.log_cue(kind, detail);
+        }
         self.update_leds().await
     }
 
@@ -628,7 +652,15 @@ impl Bridge {
             Action::GotoEnd => self.daw.goto_end().await?,
             Action::NextMarker => self.daw.next_marker().await?,
             Action::PrevMarker => self.daw.prev_marker().await?,
-            Action::AddMarker => self.daw.add_marker(None).await?,
+            Action::AddMarker => {
+                let name = self.marker_name();
+                self.daw.add_marker(name.as_deref()).await?;
+                if let Some(name) = name {
+                    // The DAW echoes the marker back when it accepts the name;
+                    // log it either way so the take sheet is complete.
+                    self.log_cue(CueKind::Marker, name);
+                }
+            }
             Action::AccessAction(a) => self.daw.access_action(a).await?,
             Action::LocateMarker(name) => match self.markers.find(name) {
                 Some(m) => {
@@ -722,6 +754,99 @@ impl Bridge {
             .ignore_prefixes
             .iter()
             .any(|p| !p.is_empty() && name.to_lowercase().starts_with(&p.to_lowercase()))
+    }
+
+    // ------------------------------------------------------------ timecode --
+
+    /// The frame rate in force: the config's if it pins one, otherwise the
+    /// session's, otherwise 30.
+    fn fps(&self) -> Fps {
+        self.cfg.timecode.fps.or(self.st.session_fps).unwrap_or_default()
+    }
+
+    fn sample_rate(&self) -> f64 {
+        self.markers
+            .sample_rate
+            .unwrap_or(self.cfg.livetrax.sample_rate)
+            .max(1.0)
+    }
+
+    /// Session start, in frames. A timecode in the config wins over the offset
+    /// the session file carries.
+    fn offset_frames(&self) -> i64 {
+        if let Some(raw) = &self.cfg.timecode.offset {
+            if let Some(tc) = timecode::Timecode::parse(raw) {
+                return tc.to_frame_number(self.fps());
+            }
+        }
+        (self.st.session_offset_samples as f64 / self.sample_rate() * self.fps().rate()).round()
+            as i64
+    }
+
+    /// What the playhead reads. The DAW's own string when it is sending one,
+    /// worked out from the sample position when it is not.
+    fn now_timecode(&self) -> String {
+        if let Some(tc) = &self.st.timecode {
+            return tc.clone();
+        }
+        timecode::from_samples(
+            self.st.position,
+            self.sample_rate(),
+            self.fps(),
+            self.offset_frames(),
+        )
+        .to_string()
+    }
+
+    fn log_cue(&mut self, kind: CueKind, detail: impl Into<String>) {
+        if !self.cfg.timecode.log {
+            return;
+        }
+        let cue = Cue {
+            timecode: self.now_timecode(),
+            samples: self.st.position,
+            kind,
+            detail: detail.into(),
+        };
+        tracing::debug!("cue {} {} {}", cue.timecode, kind.label(), cue.detail);
+        self.st.cues.push(cue);
+        let limit = self.cfg.timecode.log_limit.max(1);
+        if self.st.cues.len() > limit {
+            let excess = self.st.cues.len() - limit;
+            self.st.cues.drain(0..excess);
+        }
+    }
+
+    /// The name to give a marker the bridge drops.
+    fn marker_name(&mut self) -> Option<String> {
+        let template = self.cfg.timecode.marker_template.trim();
+        if template.is_empty() {
+            return None;
+        }
+        self.st.markers_dropped += 1;
+        Some(osc::template(
+            template,
+            &[
+                ("tc", self.now_timecode()),
+                ("samples", self.st.position.to_string()),
+                ("n", self.st.markers_dropped.to_string()),
+            ],
+        ))
+    }
+
+    fn cues_as_csv(&self) -> String {
+        let mut out = String::from("timecode,samples,kind,detail\n");
+        for cue in &self.st.cues {
+            // Detail is a free-text name; quote it and double any quotes in it.
+            out.push_str(&format!(
+                "{},{},{},\"{}\"\n",
+                cue.timecode,
+                cue.samples,
+                cue.kind.label(),
+                cue.detail.replace('"', "\"\"")
+            ));
+        }
+        out
     }
 
     // ---------------------------------------------------------- live patch --
@@ -868,22 +993,9 @@ impl Bridge {
                 self.run_action(&Action::LocateMarker(name)).await?;
             }
             Command::ReloadSession => self.load_session_markers(),
-            Command::SetNamesEnabled(on) => {
-                self.cfg.names.enabled = on;
-                tracing::info!("name sync {}", if on { "enabled" } else { "disabled" });
-            }
-            Command::SetNamesDirection(dir) => {
-                self.cfg.names.direction = dir;
-                tracing::info!("name sync direction: {dir:?}");
-            }
             Command::SetScenesEnabled(on) => {
                 self.cfg.scenes.enabled = on;
                 tracing::info!("scene linking {}", if on { "enabled" } else { "disabled" });
-            }
-            Command::SetSessionFile(path) => {
-                tracing::info!("session file: {}", path.display());
-                self.cfg.livetrax.session_file = Some(path);
-                self.load_session_markers();
             }
             Command::CreateSession(req) => {
                 if let Some(shared) = &self.shared {
@@ -943,6 +1055,36 @@ impl Bridge {
                     tracing::info!("channel map back to [map]: {} pairs", self.map.len());
                 }
             }
+            Command::LocateTimecode(raw) => {
+                let Some(tc) = timecode::Timecode::parse(&raw) else {
+                    tracing::warn!("{raw:?} is not a timecode - try 01:02:03:04");
+                    return Ok(());
+                };
+                match timecode::to_samples(
+                    tc,
+                    self.sample_rate(),
+                    self.fps(),
+                    self.offset_frames(),
+                ) {
+                    Some(samples) => {
+                        tracing::info!("locate to {tc} ({samples} samples)");
+                        self.daw.locate(samples, false).await?;
+                    }
+                    None => tracing::warn!("{tc} is before the start of the session"),
+                }
+            }
+            Command::ExportCues(path) => {
+                let csv = self.cues_as_csv();
+                let count = self.st.cues.len();
+                std::fs::write(&path, csv)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                tracing::info!("wrote {count} cues to {}", path.display());
+            }
+            Command::ClearCues => {
+                self.st.cues.clear();
+                tracing::info!("cue log cleared");
+            }
+            Command::ApplyConfig(config) => self.apply_config(*config),
             Command::SaveConfig(path) => {
                 let text = toml::to_string_pretty(&self.cfg).context("serialising config")?;
                 std::fs::write(&path, text)
@@ -952,6 +1094,32 @@ impl Bridge {
         }
         self.publish();
         Ok(())
+    }
+
+    /// Take a configuration from the preferences window. Everything except
+    /// the sockets themselves can change while the bridge runs.
+    fn apply_config(&mut self, new: Config) {
+        let rebind = new.wing.host != self.cfg.wing.host
+            || new.wing.port != self.cfg.wing.port
+            || new.wing.local_port != self.cfg.wing.local_port
+            || new.livetrax.host != self.cfg.livetrax.host
+            || new.livetrax.port != self.cfg.livetrax.port
+            || new.livetrax.local_port != self.cfg.livetrax.local_port;
+        let session_changed = new.livetrax.session_file != self.cfg.livetrax.session_file;
+
+        self.cfg = new;
+        self.map = ChannelMap::build(&self.cfg.map, self.cfg.wing.channels);
+        self.load_patch();
+        if session_changed {
+            self.load_session_markers();
+        }
+        tracing::info!("configuration applied");
+        if rebind {
+            tracing::warn!(
+                "hosts and ports change only on restart - the sockets are already bound"
+            );
+        }
+        self.publish();
     }
 
     fn truncate_for_wing(&self, name: &str) -> String {
@@ -982,6 +1150,9 @@ impl Bridge {
             .markers
             .sample_rate
             .unwrap_or(self.cfg.livetrax.sample_rate);
+        s.timecode = Some(self.now_timecode());
+        s.fps = self.fps().label().to_string();
+        s.cues = self.st.cues.clone();
         s.playing = self.st.playing;
         s.recording = self.st.recording;
         s.position = self.st.position;
@@ -1024,14 +1195,18 @@ impl Bridge {
     fn load_session_markers(&mut self) {
         let Some(path) = self.session_path() else { return };
         match markers::parse_session(&path) {
-            Ok((fresh, sr)) => {
-                let n = fresh.len();
-                self.markers.replace_from_file(fresh, sr);
+            Ok(info) => {
+                let n = info.markers.len();
+                self.markers.replace_from_file(info.markers, info.sample_rate);
+                // Timecode follows the session unless the config pins it.
+                self.st.session_fps = info.fps;
+                self.st.session_offset_samples = info.offset_samples;
                 tracing::info!(
-                    "session {}: {n} markers, {} total, sample rate {}",
+                    "session {}: {n} markers, {} total, {} Hz, timecode {}",
                     path.display(),
                     self.markers.len(),
-                    self.markers.sample_rate.unwrap_or_default()
+                    self.markers.sample_rate.unwrap_or_default(),
+                    info.fps.map(|f| f.label()).unwrap_or("not set")
                 );
             }
             Err(e) => tracing::warn!("parsing session: {e:#}"),
@@ -1253,18 +1428,80 @@ max_len_wing = 6
     }
 
     #[tokio::test]
-    async fn save_config_round_trips() {
+    async fn applying_a_config_takes_effect_and_can_be_saved() {
         let (mut bridge, _wing, _daw) = harness().await;
-        let path = std::env::temp_dir().join(format!(
-            "wltb-cfg-{}.toml",
-            std::process::id()
-        ));
-        bridge.on_command(Command::SetNamesEnabled(false)).await.unwrap();
-        bridge.on_command(Command::SaveConfig(path.clone())).await.unwrap();
+        let mut updated = bridge.cfg.clone();
+        updated.names.enabled = false;
+        updated.map.strip_offset = 10;
+        updated.timecode.marker_template = "take {n}".into();
 
+        bridge.on_command(Command::ApplyConfig(Box::new(updated))).await.unwrap();
+        assert!(!bridge.cfg.names.enabled);
+        // The channel map is rebuilt, not left on the old offset.
+        assert_eq!(bridge.map.strip(1), Some(11));
+
+        let path = std::env::temp_dir().join(format!("wltb-cfg-{}.toml", std::process::id()));
+        bridge.on_command(Command::SaveConfig(path.clone())).await.unwrap();
         let reloaded = Config::load(&path).unwrap();
-        assert!(!reloaded.names.enabled, "the toggle should survive a save");
-        assert_eq!(reloaded.wing.channels, 4);
+        assert!(!reloaded.names.enabled);
+        assert_eq!(reloaded.map.strip_offset, 10);
+        assert_eq!(reloaded.timecode.marker_template, "take {n}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn dropped_markers_are_named_and_logged_with_timecode() {
+        let (mut bridge, _wing, daw) = harness().await;
+        // A minute and a second in, at the default 48 kHz and 30 fps.
+        bridge.st.position = 48_000 * 61;
+
+        bridge.on_command(Command::Transport(Action::AddMarker)).await.unwrap();
+        assert_eq!(recv(&daw).unwrap().addr, "/add_marker");
+
+        let cue = bridge.st.cues.last().expect("the marker should be logged");
+        assert_eq!(cue.kind, CueKind::Marker);
+        assert_eq!(cue.timecode, "00:01:01:00");
+        assert_eq!(cue.detail, "00:01:01:00", "the default template is the timecode");
+
+        let csv = bridge.cues_as_csv();
+        assert!(csv.starts_with("timecode,samples,kind,detail\n"));
+        assert!(csv.contains("00:01:01:00,2928000,marker"), "{csv}");
+    }
+
+    #[tokio::test]
+    async fn the_daws_own_timecode_wins_over_the_calculated_one() {
+        let (mut bridge, _wing, _daw) = harness().await;
+        bridge.st.position = 48_000 * 61;
+        assert_eq!(bridge.now_timecode(), "00:01:01:00");
+
+        // Once LiveTrax sends timecode, that is what gets stamped - it knows
+        // about session offsets and pull-up that we would have to guess at.
+        bridge
+            .on_daw(Incoming {
+                from: "127.0.0.1:1".parse().unwrap(),
+                msg: rosc::OscMessage {
+                    addr: "/position/smpte".into(),
+                    args: vec![OscType::String("10:00:01:00".into())],
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(bridge.now_timecode(), "10:00:01:00");
+    }
+
+    #[tokio::test]
+    async fn locating_by_timecode_lands_on_the_right_sample() {
+        let (mut bridge, _wing, daw) = harness().await;
+        bridge
+            .on_command(Command::LocateTimecode("00:00:10:00".into()))
+            .await
+            .unwrap();
+        let msg = recv(&daw).expect("a locate should have been sent");
+        assert_eq!(msg.addr, "/locate");
+        assert_eq!(msg.args[0], OscType::Int(480_000), "ten seconds at 48 kHz");
+
+        // Nonsense is refused rather than sent as zero.
+        bridge.on_command(Command::LocateTimecode("half past four".into())).await.unwrap();
+        assert!(recv(&daw).is_none());
     }
 }

@@ -19,6 +19,16 @@ pub struct Marker {
     pub observed: bool,
 }
 
+/// What a session file tells us beyond its markers.
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo {
+    pub markers: Vec<Marker>,
+    pub sample_rate: Option<f64>,
+    pub fps: Option<crate::timecode::Fps>,
+    /// Session start offset, in samples, sign already applied.
+    pub offset_samples: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MarkerTable {
     markers: Vec<Marker>,
@@ -73,8 +83,9 @@ impl MarkerTable {
     }
 }
 
-/// Parse `<Locations>` out of an Ardour/LiveTrax session file.
-pub fn parse_session(path: &Path) -> Result<(Vec<Marker>, Option<f64>)> {
+/// Parse the parts of an Ardour/LiveTrax session file the bridge needs:
+/// markers, sample rate, and the timecode format and offset.
+pub fn parse_session(path: &Path) -> Result<SessionInfo> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading session file {}", path.display()))?;
     let mut reader = Reader::from_str(&text);
@@ -82,6 +93,9 @@ pub fn parse_session(path: &Path) -> Result<(Vec<Marker>, Option<f64>)> {
     // the root element, so it is always read before any <Location>.
     let mut raw_markers: Vec<(String, RawPos)> = Vec::new();
     let mut sample_rate = None;
+    let mut fps = None;
+    let mut offset_samples: i64 = 0;
+    let mut offset_negative = false;
 
     loop {
         match reader.read_event().context("parsing session XML")? {
@@ -92,6 +106,24 @@ pub fn parse_session(path: &Path) -> Result<(Vec<Marker>, Option<f64>)> {
                     b"Session" => {
                         if let Some(v) = attr(&e, b"sample-rate") {
                             sample_rate = v.parse::<f64>().ok();
+                        }
+                    }
+                    b"Option" => {
+                        let (Some(name), Some(value)) = (attr(&e, b"name"), attr(&e, b"value"))
+                        else {
+                            continue;
+                        };
+                        match name.as_str() {
+                            "timecode-format" => {
+                                fps = crate::timecode::Fps::from_session_value(&value)
+                            }
+                            "timecode-offset" => {
+                                offset_samples = value.trim().parse::<i64>().unwrap_or(0)
+                            }
+                            "timecode-offset-negative" => {
+                                offset_negative = matches!(value.trim(), "1" | "yes" | "true")
+                            }
+                            _ => {}
                         }
                     }
                     b"Location" => {
@@ -126,7 +158,12 @@ pub fn parse_session(path: &Path) -> Result<(Vec<Marker>, Option<f64>)> {
         tracing::warn!("{skipped} music-time markers skipped: only audio-time markers can be located");
     }
     markers.sort_by_key(|m| m.start);
-    Ok((markers, sample_rate))
+    Ok(SessionInfo {
+        markers,
+        sample_rate,
+        fps,
+        offset_samples: if offset_negative { -offset_samples } else { offset_samples },
+    })
 }
 
 fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {

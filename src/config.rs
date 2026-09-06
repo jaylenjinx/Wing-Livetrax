@@ -26,6 +26,8 @@ pub struct Config {
     pub snapshot: Snapshot,
     #[serde(default)]
     pub patch: Patch,
+    #[serde(default)]
+    pub timecode: Timecode,
 }
 
 impl Config {
@@ -467,6 +469,47 @@ impl ChannelMap {
     }
     pub fn len(&self) -> usize { self.to_strip.len() }
 }
+
+// -------------------------------------------------------------- timecode ---
+
+/// SMPTE timecode: how to read it, and what to stamp with it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Timecode {
+    /// Frame rate. Left unset, it follows the session file.
+    #[serde(default)]
+    pub fps: Option<crate::timecode::Fps>,
+    /// Session start, when you want one the session file does not carry.
+    #[serde(default)]
+    pub offset: Option<String>,
+    /// Name for markers the bridge drops. `{tc}` is the timecode, `{samples}`
+    /// the playhead, `{n}` a running count.
+    #[serde(default = "d_marker_template")]
+    pub marker_template: String,
+    /// Keep a timestamped log of markers, scene recalls and takes.
+    #[serde(default = "d_true")]
+    pub log: bool,
+    /// Log transport starts and stops as well.
+    #[serde(default)]
+    pub log_transport: bool,
+    #[serde(default = "d_log_limit")]
+    pub log_limit: usize,
+}
+
+impl Default for Timecode {
+    fn default() -> Self {
+        Self {
+            fps: None,
+            offset: None,
+            marker_template: d_marker_template(),
+            log: true,
+            log_transport: false,
+            log_limit: d_log_limit(),
+        }
+    }
+}
+
+fn d_marker_template() -> String { "{tc}".into() }
+fn d_log_limit() -> usize { 2_000 }
 
 // ----------------------------------------------------------------- patch ---
 
