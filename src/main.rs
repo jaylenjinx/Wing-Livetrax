@@ -52,7 +52,8 @@ enum Cmd {
     /// Run the bridge with the graphical front end (the default).
     Gui {
         /// Open on a specific tab: channels, transport, scenes, new-session,
-        /// snapshot, log - or "preferences" for the settings window.
+        /// snapshot, log - or "preferences", optionally with a section, as in
+        /// "preferences/transport".
         #[arg(long)]
         tab: Option<String>,
         /// Place the window at "x,y" instead of letting the OS choose.

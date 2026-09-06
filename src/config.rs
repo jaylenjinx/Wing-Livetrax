@@ -288,6 +288,10 @@ pub enum LedSource {
     Playing,
     Recording,
     Stopped,
+    Looping,
+    PunchIn,
+    PunchOut,
+    Click,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -303,6 +307,24 @@ pub enum Action {
     NextMarker,
     PrevMarker,
     AddMarker,
+    /// Wind forward and back. Pressing again on a rolling transport goes
+    /// faster, the way the DAW's own buttons do.
+    FastForward,
+    Rewind,
+    LoopToggle,
+    PunchIn,
+    PunchOut,
+    ClickToggle,
+    /// Arm or disarm every track at once.
+    AllRecEnable,
+    /// Panic: all notes off, everywhere.
+    MidiPanic,
+    /// Jump by whole bars, negative to go back.
+    JumpBars(f32),
+    /// Jump by seconds, negative to go back.
+    JumpSeconds(f32),
+    /// Play at a speed: 1 is normal, 0.5 half, -1 backwards, 0 stops.
+    SetSpeed(f32),
     /// Locate to a named marker known from the session file or observed live.
     LocateMarker(String),
     /// Ardour/LiveTrax action path, e.g. "Transport/Record".

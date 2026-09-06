@@ -122,8 +122,14 @@ enabled = true
 
 # Console control -> DAW action. Get these addresses from `learn`: assign a
 # USER button on the WING, press it, and paste what is printed.
+# Easiest way to fill these in: Preferences > Transport > learn, then press the
+# button on the console.
+#
 # Actions: play, stop, toggle_play, record_arm_toggle, record_start,
-#          goto_start, goto_end, next_marker, prev_marker, add_marker,
+#          all_rec_enable, goto_start, goto_end, rewind, fast_forward,
+#          next_marker, prev_marker, add_marker, loop_toggle, punch_in,
+#          punch_out, click_toggle, midi_panic,
+#          { jump_bars = -1.0 }, { jump_seconds = 10.0 }, { set_speed = 0.5 },
 #          { locate_marker = "Song 3" }, { access_action = "Transport/Record" },
 #          { osc = { address = "/toggle_punch_in", args = [1] } }
 [[transport.buttons]]
@@ -144,7 +150,8 @@ action = "goto_start"
 
 # DAW state -> console feedback (button LED colour, indicator, etc.)
 # [[transport.leds]]
-# source = "playing"          # playing | recording | stopped
+# source = "playing"          # playing | recording | stopped | looping
+#                             # | punch-in | punch-out | click
 # address = "/$ctl/user/1/bu/1/led"
 # on = 1
 # off = 0

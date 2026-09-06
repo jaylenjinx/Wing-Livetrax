@@ -268,7 +268,7 @@ footer { border-top: 1px solid var(--edge); margin-top: 40px; padding-top: 18px;
       <li><a href="#first-run">First run</a></li>
       <li><a href="#patch">The recorded output</a></li>
       <li><a href="#names">Channel names</a></li>
-      <li><a href="#transport">Transport</a></li>
+      <li><a href="#transport">Playback</a></li>
       <li><a href="#scenes">Scenes &amp; markers</a></li>
       <li><a href="#timecode">Timecode</a></li>
       <li><a href="#session">Session from console</a></li>
@@ -318,7 +318,7 @@ footer { border-top: 1px solid var(--edge); margin-top: 40px; padding-top: 18px;
 
       <ul>
         <li><strong>Channel names</strong> sync in either direction, debounced and echo-suppressed so a name never ping-pongs.</li>
-        <li><strong>Transport and record</strong> run from console user buttons, with the DAW's state fed back to their LEDs.</li>
+        <li><strong>Playback and record</strong> run from the app or from console user buttons — play, wind, loop, punch, click, varispeed, scrub — with the DAW's state fed back to the console's lights.</li>
         <li><strong>Scenes link to markers</strong>: recalling a scene locates the playhead, or drops a named marker if you are already rolling.</li>
         <li><strong>Sessions</strong> can be built from the console's channel list, tracks named and in the right order.</li>
         <li><strong>Snapshots</strong> go the other way: a LiveTrax session's track names written into a real <code>.snap</code>.</li>
@@ -417,7 +417,17 @@ wing-livetrax-bridge patch --groups                       <span class="c"># what
 
     <section id="transport">
       <p class="eyebrow">Feature</p>
-      <h2>Transport and record</h2>
+      <h2>Playback, transport and record</h2>
+      <p>The Transport tab is the playback surface: start, wind, play and stop, end, record arm and record-and-roll; loop, punch in, punch out and click as toggles that light when the DAW says they are on; nudge by seconds, bars or markers; a speed control for varispeed and reverse; and a scrub bar across the session that locates on release rather than stuttering the transport on every frame.</p>
+      <figure class="shot">
+        <img src="ui-transport.png" alt="The Transport tab: a playback row, lit loop and click toggles, nudge buttons, a speed slider, a scrub bar across the session, a go-to-timecode field and the show log.">
+        <figcaption>State runs both ways: loop, punch, click, record and speed follow LiveTrax whoever changed them.</figcaption>
+      </figure>
+      <h3>Driving it from the console</h3>
+      <p>Open Preferences ▸ Transport, press <strong>learn</strong> on a row, then press the button on the console — the address fills itself in. Everything the console sends is listed live underneath, so you can pick one out of the list instead. No terminal, no copying addresses by hand.</p>
+      <figure class="shot">
+        <img src="ui-learn.png" alt="The Transport section of Preferences: button rows with a learn button, an action dropdown and a threshold, and below them a live list of what the console is sending with a use button.">
+      </figure>
       <p>Each <code>[[transport.buttons]]</code> entry binds one console address to one action:</p>
       <div class="code"><pre><code>[[transport.buttons]]
 address = "/$ctl/user/1/bu/1"
@@ -426,8 +436,8 @@ action = "toggle_play"
 [[transport.buttons]]
 address = "/$ctl/user/1/bu/3"
 action = { locate_marker = "Song 3" }</code></pre></div>
-      <p>Available actions: <code>play</code>, <code>stop</code>, <code>toggle_play</code>, <code>record_arm_toggle</code>, <code>record_start</code>, <code>goto_start</code>, <code>goto_end</code>, <code>next_marker</code>, <code>prev_marker</code>, <code>add_marker</code>, <code>{ locate_marker = "…" }</code>, <code>{ access_action = "…" }</code>, and a raw <code>{ osc = { … } }</code> escape hatch.</p>
-      <p>Per-track arming uses <code>[[transport.rec_arm]]</code>; DAW state comes back to the console's LEDs through <code>[[transport.leds]]</code>.</p>
+      <p>Available actions: <code>play</code>, <code>stop</code>, <code>toggle_play</code>, <code>record_arm_toggle</code>, <code>record_start</code>, <code>all_rec_enable</code>, <code>goto_start</code>, <code>goto_end</code>, <code>rewind</code>, <code>fast_forward</code>, <code>next_marker</code>, <code>prev_marker</code>, <code>add_marker</code>, <code>loop_toggle</code>, <code>punch_in</code>, <code>punch_out</code>, <code>click_toggle</code>, <code>midi_panic</code>, <code>{ jump_bars = -1.0 }</code>, <code>{ jump_seconds = 10.0 }</code>, <code>{ set_speed = 0.5 }</code>, <code>{ locate_marker = "…" }</code>, <code>{ access_action = "…" }</code>, and a raw <code>{ osc = { … } }</code> escape hatch.</p>
+      <p>Per-track arming uses <code>[[transport.rec_arm]]</code>; DAW state comes back to the console's lights through <code>[[transport.leds]]</code>, whose sources are <code>playing</code>, <code>recording</code>, <code>stopped</code>, <code>looping</code>, <code>punch-in</code>, <code>punch-out</code> and <code>click</code>.</p>
     </section>
 
     <section id="scenes">
@@ -451,10 +461,6 @@ action = { locate_marker = "Song 3" }</code></pre></div>
       <p class="eyebrow">Feature</p>
       <h2>Timecode</h2>
       <p>The header carries the DAW's own SMPTE clock. LiveTrax publishes it as <code>/position/smpte</code> once the <em>timecode</em> feedback bit is on; when it is not sending timecode the bridge works the clock out from the playhead instead, so the display never goes blank.</p>
-      <figure class="shot">
-        <img src="ui-transport.png" alt="The Transport tab: a go-to-timecode field, the transport actions, and a show log listing markers and scene recalls against their timecode.">
-        <figcaption>Type a timecode to locate there; below, the show log builds itself as the session runs.</figcaption>
-      </figure>
       <p>Frame rate and session start come from the session file itself — <code>timecode-format</code> and <code>timecode-offset</code> — so 29.97 drop-frame behaves like 29.97 drop-frame rather than like 30. The arithmetic accounts for it: the 29.97 and 59.94 rates run 1000/1001 slow, and their drop-frame variants skip frame numbers in nine minutes out of ten.</p>
       <div class="table-wrap">
         <table>

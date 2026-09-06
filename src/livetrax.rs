@@ -74,6 +74,52 @@ impl Daw {
         self.link.send("/prev_marker", vec![OscType::Int(1)]).await
     }
 
+    /// Momentary wind. Ardour speeds up while these are pressed repeatedly.
+    pub async fn fast_forward(&self) -> Result<()> {
+        self.link.send("/ffwd", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn rewind(&self) -> Result<()> {
+        self.link.send("/rewind", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn loop_toggle(&self) -> Result<()> {
+        self.link.send("/loop_toggle", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn punch_in(&self) -> Result<()> {
+        self.link.send("/toggle_punch_in", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn punch_out(&self) -> Result<()> {
+        self.link.send("/toggle_punch_out", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn click_toggle(&self) -> Result<()> {
+        self.link.send("/toggle_click", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn all_rec_enable(&self) -> Result<()> {
+        self.link.send("/toggle_all_rec_enables", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn midi_panic(&self) -> Result<()> {
+        self.link.send("/midi_panic", vec![OscType::Int(1)]).await
+    }
+
+    pub async fn jump_bars(&self, bars: f32) -> Result<()> {
+        self.link.send("/jump_bars", vec![OscType::Float(bars)]).await
+    }
+
+    pub async fn jump_seconds(&self, seconds: f32) -> Result<()> {
+        self.link.send("/jump_seconds", vec![OscType::Float(seconds)]).await
+    }
+
+    /// 1 is normal speed, 0 stops, negatives play backwards.
+    pub async fn set_speed(&self, speed: f32) -> Result<()> {
+        self.link.send("/set_transport_speed", vec![OscType::Float(speed)]).await
+    }
+
     pub async fn access_action(&self, action: &str) -> Result<()> {
         self.link
             .send("/access_action", vec![OscType::String(action.to_string())])

@@ -36,10 +36,12 @@ pub fn run(
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let mut app = App::new(shared, tx, log, cfg, cfg_path);
     if let Some(tab) = start_tab {
-        // "preferences" opens the window rather than switching tabs.
-        if tab.eq_ignore_ascii_case("preferences") || tab.eq_ignore_ascii_case("prefs") {
+        // "preferences" opens the window rather than switching tabs, and
+        // "preferences/transport" opens it on a section.
+        let (head, section) = tab.split_once('/').unwrap_or((tab, ""));
+        if head.eq_ignore_ascii_case("preferences") || head.eq_ignore_ascii_case("prefs") {
             let config = app.cfg.clone();
-            app.prefs.open_with(&config);
+            app.prefs.open_at(&config, section);
         } else {
             app.tab = Tab::from_name(tab).with_context(|| format!("unknown tab {tab:?}"))?;
         }
@@ -232,6 +234,8 @@ struct App {
     patch_form: PatchForm,
     /// The "go to timecode" entry.
     tc_input: String,
+    /// Where the scrub bar is being dragged to, while it is being dragged.
+    scrubbing: Option<i64>,
     prefs: Prefs,
     snap: Snapshot,
 }
@@ -249,6 +253,7 @@ impl App {
             snap_form: SnapForm::new(&cfg),
             patch_form: PatchForm::new(&cfg),
             tc_input: String::new(),
+            scrubbing: None,
             prefs: Prefs::new(&cfg),
             shared,
             tx,
@@ -304,7 +309,7 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.prefs.open_with(&self.cfg);
         }
-        for command in self.prefs.show(ui.ctx(), &self.cfg_path) {
+        for command in self.prefs.show(ui.ctx(), &self.cfg_path, &self.snap.console_events) {
             if let Command::ApplyConfig(config) = &command {
                 self.cfg = (**config).clone();
             }
@@ -387,6 +392,15 @@ impl App {
             }
             if let Some(scene) = self.snap.current_scene {
                 chip(ui, &format!("scene  {scene}"));
+            }
+            if self.snap.looping {
+                chip(ui, "loop");
+            }
+            if self.snap.punch_in || self.snap.punch_out {
+                chip(ui, "punch");
+            }
+            if self.snap.click {
+                chip(ui, "click");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Preferences").clicked() {
@@ -674,29 +688,7 @@ impl App {
     }
 
     fn transport_tab(&mut self, ui: &mut egui::Ui) {
-        theme::titled_card(ui, "STATE", |ui| {
-            ui.horizontal(|ui| {
-                theme::dot(ui, if self.snap.playing { GREEN } else { theme::LINE });
-                ui.label(if self.snap.playing { "rolling" } else { "stopped" });
-                ui.add_space(10.0);
-                theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
-                ui.label(if self.snap.recording { "record armed" } else { "not armed" });
-                ui.add_space(14.0);
-                ui.label(
-                    egui::RichText::new(timecode(self.snap.position, self.snap.sample_rate))
-                        .monospace()
-                        .size(15.0),
-                );
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} samples @ {} Hz",
-                        self.snap.position, self.snap.sample_rate
-                    ))
-                    .small()
-                    .color(DIM),
-                );
-            });
-        });
+        self.playback(ui);
         ui.add_space(10.0);
 
         theme::titled_card(ui, "GO TO TIMECODE", |ui| {
@@ -738,29 +730,147 @@ impl App {
             });
         });
         ui.add_space(10.0);
+        self.cue_log(ui);
+    }
 
-        theme::titled_card(ui, "SEND TO LIVETRAX", |ui| {
-            ui.horizontal_wrapped(|ui| {
+    /// The playback surface: the things you reach for while a take is running.
+    fn playback(&mut self, ui: &mut egui::Ui) {
+        theme::titled_card(ui, "PLAYBACK", |ui| {
+            let rolling = self.snap.playing;
+
+            ui.horizontal(|ui| {
+                if ui.button("|< Start").clicked() {
+                    self.send(Command::Transport(Action::GotoStart));
+                }
+                if ui.button("<< Back").clicked() {
+                    self.send(Command::Transport(Action::Rewind));
+                }
+                if ui.add(theme::primary(if rolling { "Stop" } else { "Play" })).clicked() {
+                    self.send(Command::Transport(if rolling {
+                        Action::Stop
+                    } else {
+                        Action::Play
+                    }));
+                }
+                if ui.button("Forward >>").clicked() {
+                    self.send(Command::Transport(Action::FastForward));
+                }
+                if ui.button("End >|").clicked() {
+                    self.send(Command::Transport(Action::GotoEnd));
+                }
+                ui.add_space(8.0);
+                theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
+                if ui.button("Rec arm").clicked() {
+                    self.send(Command::Transport(Action::RecordArmToggle));
+                }
+                if ui.button("Record + roll").clicked() {
+                    self.send(Command::Transport(Action::RecordStart));
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (label, active, action) in [
+                    ("Loop", self.snap.looping, Action::LoopToggle),
+                    ("Punch in", self.snap.punch_in, Action::PunchIn),
+                    ("Punch out", self.snap.punch_out, Action::PunchOut),
+                    ("Click", self.snap.click, Action::ClickToggle),
+                ] {
+                    let text = egui::RichText::new(label).color(if active { TEXT } else { DIM });
+                    if ui.selectable_label(active, text).clicked() {
+                        self.send(Command::Transport(action));
+                    }
+                }
+                ui.separator();
+                if ui.button("Arm every track").clicked() {
+                    self.send(Command::Transport(Action::AllRecEnable));
+                }
+                if ui.button("Drop marker").clicked() {
+                    self.send(Command::Transport(Action::AddMarker));
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                theme::field(ui, "Nudge");
                 for (label, action) in [
-                    ("Play", Action::Play),
-                    ("Stop", Action::Stop),
-                    ("Toggle roll", Action::TogglePlay),
-                    ("Record arm", Action::RecordArmToggle),
-                    ("Record + roll", Action::RecordStart),
-                    ("Go to start", Action::GotoStart),
-                    ("Go to end", Action::GotoEnd),
-                    ("Previous marker", Action::PrevMarker),
-                    ("Next marker", Action::NextMarker),
-                    ("Drop marker", Action::AddMarker),
+                    ("-10 s", Action::JumpSeconds(-10.0)),
+                    ("-1 s", Action::JumpSeconds(-1.0)),
+                    ("+1 s", Action::JumpSeconds(1.0)),
+                    ("+10 s", Action::JumpSeconds(10.0)),
                 ] {
                     if ui.button(label).clicked() {
-                        self.send(Command::Transport(action.clone()));
+                        self.send(Command::Transport(action));
+                    }
+                }
+                ui.separator();
+                for (label, action) in [
+                    ("-1 bar", Action::JumpBars(-1.0)),
+                    ("+1 bar", Action::JumpBars(1.0)),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.send(Command::Transport(action));
+                    }
+                }
+                ui.separator();
+                if ui.button("Previous marker").clicked() {
+                    self.send(Command::Transport(Action::PrevMarker));
+                }
+                if ui.button("Next marker").clicked() {
+                    self.send(Command::Transport(Action::NextMarker));
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                theme::field(ui, "Speed");
+                let mut speed = self.snap.speed;
+                ui.spacing_mut().slider_width = 220.0;
+                let slider = ui.add(
+                    egui::Slider::new(&mut speed, -2.0..=2.0)
+                        .fixed_decimals(2)
+                        .suffix("x")
+                        .clamping(egui::SliderClamping::Always),
+                );
+                // Send on release: dragging would flood the DAW with speeds.
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    self.send(Command::Transport(Action::SetSpeed(speed)));
+                }
+                for (label, value) in [("0.5x", 0.5), ("1x", 1.0), ("2x", 2.0)] {
+                    if ui.small_button(label).clicked() {
+                        self.send(Command::Transport(Action::SetSpeed(value)));
                     }
                 }
             });
+
+            ui.add_space(8.0);
+            self.scrub_bar(ui);
         });
-        ui.add_space(10.0);
-        self.cue_log(ui);
+    }
+
+    /// Drag anywhere in the session. The playhead follows on release, not
+    /// during the drag - locating on every frame would stutter the transport.
+    fn scrub_bar(&mut self, ui: &mut egui::Ui) {
+        let end = self.snap.session_end.max(self.snap.position).max(1);
+        let mut value = self.scrubbing.unwrap_or(self.snap.position).clamp(0, end);
+        ui.horizontal(|ui| {
+            theme::num(ui, timecode_of(&self.snap, value));
+            // Sliders take their width from the spacing, not from add_sized.
+            ui.spacing_mut().slider_width = (ui.available_width() - 130.0).max(160.0);
+            let response = ui.add(egui::Slider::new(&mut value, 0..=end).show_value(false));
+            if response.dragged() || response.drag_started() {
+                self.scrubbing = Some(value);
+            }
+            if response.drag_stopped() {
+                self.send(Command::LocateSamples(value));
+                self.scrubbing = None;
+            }
+            // A click without a drag still moves the playhead.
+            if response.changed() && !response.dragged() && self.scrubbing.is_none() {
+                self.send(Command::LocateSamples(value));
+            }
+            theme::num(ui, timecode_of(&self.snap, end));
+        });
     }
 
     /// The show log: what happened, and at what timecode.
@@ -1410,6 +1520,17 @@ fn age(last: Option<std::time::Instant>) -> String {
         Some(t) => format!("{:.0}s", t.elapsed().as_secs_f32()),
         None => "silent".to_string(),
     }
+}
+
+/// A sample position on the same clock the header shows.
+fn timecode_of(snap: &Snapshot, samples: i64) -> String {
+    crate::timecode::from_samples(
+        samples,
+        snap.sample_rate,
+        snap.fps_value,
+        snap.tc_offset_frames,
+    )
+    .to_string()
 }
 
 fn timecode(samples: i64, rate: f64) -> String {

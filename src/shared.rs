@@ -32,9 +32,22 @@ pub struct Snapshot {
     /// Playhead as the DAW reports it in SMPTE, when it is sending timecode.
     pub timecode: Option<String>,
     pub fps: String,
+    /// Enough to put any sample position on the same clock as the header.
+    pub fps_value: crate::timecode::Fps,
+    pub tc_offset_frames: i64,
     pub cues: Vec<Cue>,
     pub playing: bool,
     pub recording: bool,
+    pub looping: bool,
+    pub punch_in: bool,
+    pub punch_out: bool,
+    pub click: bool,
+    /// 1 is normal speed, 0 stopped, negatives backwards.
+    pub speed: f32,
+    /// Last sample the DAW reports for the session, for the scrub bar.
+    pub session_end: i64,
+    /// What the console has sent lately, so a button can be learned.
+    pub console_events: Vec<ConsoleEvent>,
     pub position: i64,
     pub current_scene: Option<i32>,
     pub current_marker: Option<String>,
@@ -59,6 +72,16 @@ pub struct Snapshot {
     pub session_report: Option<Result<SessionReport, String>>,
     /// Set while a session is being written, so the GUI can show progress.
     pub session_busy: bool,
+}
+
+/// A message the console sent that was not a channel name: the raw material
+/// for learning a button binding.
+#[derive(Debug, Clone)]
+pub struct ConsoleEvent {
+    /// Rises with every message, so the interface can spot a new one.
+    pub seq: u64,
+    pub address: String,
+    pub value: f32,
 }
 
 /// One line of the show log: what happened, and where.
@@ -103,6 +126,8 @@ pub enum Command {
     Transport(Action),
     /// Locate to a typed timecode, e.g. "01:02:03:04".
     LocateTimecode(String),
+    /// Locate to a sample position, from the scrub bar.
+    LocateSamples(i64),
     ExportCues(PathBuf),
     ClearCues,
     /// Replace the whole configuration, from the preferences window.

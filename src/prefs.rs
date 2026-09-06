@@ -11,7 +11,7 @@ use crate::config::{
     Action, Arg, ButtonMap, Config, Direction, LedMap, LedSource, Pair, PatchSource, RecArmMap,
     SceneDirection, SceneMarker,
 };
-use crate::shared::Command;
+use crate::shared::{Command, ConsoleEvent};
 use crate::theme::{self, ACCENT, AMBER, DIM, TEXT};
 use crate::timecode::Fps;
 
@@ -45,6 +45,25 @@ enum Section {
 }
 
 impl Section {
+    fn from_name(name: &str) -> Option<Section> {
+        Section::ALL
+            .iter()
+            .find(|(_, label)| label.eq_ignore_ascii_case(name))
+            .map(|(section, _)| *section)
+            .or_else(|| match name.to_lowercase().as_str() {
+                "console" | "wing" => Some(Section::Console),
+                "livetrax" | "daw" => Some(Section::LiveTrax),
+                "names" => Some(Section::Names),
+                "patch" | "output" => Some(Section::Patch),
+                "transport" | "buttons" => Some(Section::Transport),
+                "scenes" => Some(Section::Scenes),
+                "timecode" => Some(Section::Timecode),
+                "snapshot" | "snapshots" => Some(Section::Snapshot),
+                "map" | "mapping" => Some(Section::Mapping),
+                _ => None,
+            })
+    }
+
     const ALL: [(Section, &'static str); 9] = [
         (Section::Console, "Console"),
         (Section::LiveTrax, "LiveTrax"),
@@ -63,26 +82,52 @@ pub struct Prefs {
     draft: Config,
     section: Section,
     status: Option<String>,
+    /// Which button row is waiting for a press on the console.
+    learning: Option<usize>,
+    /// Console messages older than this were already there when we armed.
+    learn_from: u64,
 }
 
 impl Prefs {
     pub fn new(cfg: &Config) -> Self {
-        Self { open: false, draft: cfg.clone(), section: Section::Console, status: None }
+        Self {
+            open: false,
+            draft: cfg.clone(),
+            section: Section::Console,
+            status: None,
+            learning: None,
+            learn_from: 0,
+        }
+    }
+
+    /// Open on a named section, for `gui --tab preferences/transport`.
+    pub fn open_at(&mut self, cfg: &Config, section: &str) {
+        self.open_with(cfg);
+        if let Some(section) = Section::from_name(section) {
+            self.section = section;
+        }
     }
 
     /// Open on the configuration as it currently stands.
     pub fn open_with(&mut self, cfg: &Config) {
         self.draft = cfg.clone();
         self.status = None;
+        self.learning = None;
         self.open = true;
     }
 
     /// Draw the window. Returns whatever the buttons asked for.
-    pub fn show(&mut self, ctx: &egui::Context, cfg_path: &Path) -> Vec<Command> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        cfg_path: &Path,
+        console: &[ConsoleEvent],
+    ) -> Vec<Command> {
         let mut commands = Vec::new();
         if !self.open {
             return commands;
         }
+        self.take_learned_press(console);
         let mut open = true;
         egui::Window::new("Preferences")
             .open(&mut open)
@@ -116,7 +161,7 @@ impl Prefs {
                                     Section::LiveTrax => self.livetrax(ui),
                                     Section::Names => self.names(ui),
                                     Section::Patch => self.patch(ui),
-                                    Section::Transport => self.transport(ui),
+                                    Section::Transport => self.transport(ui, console),
                                     Section::Scenes => self.scenes(ui),
                                     Section::Timecode => self.timecode(ui),
                                     Section::Snapshot => self.snapshot(ui),
@@ -275,27 +320,58 @@ impl Prefs {
         });
     }
 
-    fn transport(&mut self, ui: &mut egui::Ui) {
+    /// A press on the console fills the row that asked for it.
+    fn take_learned_press(&mut self, console: &[ConsoleEvent]) {
+        let Some(index) = self.learning else { return };
+        // Only a press counts; the release that follows it would overwrite.
+        let Some(event) = console
+            .iter()
+            .filter(|e| e.seq > self.learn_from && e.value >= 0.5)
+            .max_by_key(|e| e.seq)
+        else {
+            return;
+        };
+        if let Some(button) = self.draft.transport.buttons.get_mut(index) {
+            button.address = event.address.clone();
+            self.status = Some(format!("Learned {}", event.address));
+        }
+        self.learning = None;
+    }
+
+    fn transport(&mut self, ui: &mut egui::Ui, console: &[ConsoleEvent]) {
         heading(ui, "Transport", "Console buttons that drive the DAW, and lights that follow it.");
         check_row(ui, "Transport control", &mut self.draft.transport.enabled);
 
         ui.add_space(8.0);
         ui.label(egui::RichText::new("BUTTONS").small().strong().color(DIM));
-        hint(ui, "Get an address by pressing the button while `learn` is running.");
+        hint(ui, "Press learn, then the button on the console - or pick one out of what it is sending, below.");
         let mut remove = None;
+        let mut learn = None;
+        let learning = self.learning;
         for (i, button) in self.draft.transport.buttons.iter_mut().enumerate() {
+            let waiting = learning == Some(i);
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut button.address)
-                        .desired_width(210.0)
+                        .desired_width(200.0)
                         .font(egui::TextStyle::Monospace),
                 );
+                let label = if waiting { "press it now" } else { "learn" };
+                let text = egui::RichText::new(label).color(if waiting { ACCENT } else { DIM });
+                if ui.add(egui::Button::new(text).small()).clicked() {
+                    learn = Some(if waiting { None } else { Some(i) });
+                }
                 action_editor(ui, i, &mut button.action);
                 ui.add(egui::DragValue::new(&mut button.threshold).speed(0.05).range(0.0..=1.0));
                 if ui.small_button("remove").clicked() {
                     remove = Some(i);
                 }
             });
+        }
+        if let Some(target) = learn {
+            self.learning = target;
+            self.learn_from = console.iter().map(|e| e.seq).max().unwrap_or(0);
+            self.status = target.map(|_| "Press the button on the console.".to_string());
         }
         if let Some(i) = remove {
             self.draft.transport.buttons.remove(i);
@@ -309,21 +385,71 @@ impl Prefs {
         }
 
         ui.add_space(10.0);
+        ui.label(egui::RichText::new("WHAT THE CONSOLE IS SENDING").small().strong().color(DIM));
+        if console.is_empty() {
+            hint(ui, "Nothing yet. Touch a control on the console and it appears here.");
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("console_activity")
+                .max_height(120.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut pick = None;
+                    for event in console.iter().rev().take(20) {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(&event.address)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(TEXT),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{:.2}", event.value))
+                                    .monospace()
+                                    .small()
+                                    .color(DIM),
+                            );
+                            if ui.small_button("use").clicked() {
+                                pick = Some(event.address.clone());
+                            }
+                        });
+                    }
+                    if let Some(address) = pick {
+                        // Fill the row being learned, or add one for it.
+                        match self.learning.and_then(|i| self.draft.transport.buttons.get_mut(i)) {
+                            Some(button) => button.address = address.clone(),
+                            None => self.draft.transport.buttons.push(ButtonMap {
+                                address: address.clone(),
+                                threshold: 0.5,
+                                action: Action::TogglePlay,
+                            }),
+                        }
+                        self.learning = None;
+                        self.status = Some(format!("Bound {address}"));
+                    }
+                });
+        }
+
+        ui.add_space(10.0);
         ui.label(egui::RichText::new("LIGHTS").small().strong().color(DIM));
         let mut remove = None;
         for (i, led) in self.draft.transport.leds.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt(("led", i))
-                    .selected_text(match led.source {
-                        LedSource::Playing => "rolling",
-                        LedSource::Recording => "recording",
-                        LedSource::Stopped => "stopped",
-                    })
+                    .selected_text(led_label(led.source))
                     .width(110.0)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut led.source, LedSource::Playing, "rolling");
-                        ui.selectable_value(&mut led.source, LedSource::Recording, "recording");
-                        ui.selectable_value(&mut led.source, LedSource::Stopped, "stopped");
+                        for source in [
+                            LedSource::Playing,
+                            LedSource::Recording,
+                            LedSource::Stopped,
+                            LedSource::Looping,
+                            LedSource::PunchIn,
+                            LedSource::PunchOut,
+                            LedSource::Click,
+                        ] {
+                            ui.selectable_value(&mut led.source, source, led_label(source));
+                        }
                     });
                 ui.add(
                     egui::TextEdit::singleline(&mut led.address)
@@ -659,17 +785,25 @@ type SimpleAction = (&'static str, fn() -> Action);
 
 /// The simple actions in a combo; the two that carry text get a field.
 fn action_editor(ui: &mut egui::Ui, index: usize, action: &mut Action) {
-    const SIMPLE: [SimpleAction; 10] = [
+    const SIMPLE: [SimpleAction; 18] = [
         ("play", || Action::Play),
         ("stop", || Action::Stop),
         ("toggle roll", || Action::TogglePlay),
         ("record arm", || Action::RecordArmToggle),
         ("record + roll", || Action::RecordStart),
+        ("arm every track", || Action::AllRecEnable),
         ("go to start", || Action::GotoStart),
         ("go to end", || Action::GotoEnd),
+        ("wind back", || Action::Rewind),
+        ("wind forward", || Action::FastForward),
         ("next marker", || Action::NextMarker),
         ("previous marker", || Action::PrevMarker),
         ("drop marker", || Action::AddMarker),
+        ("loop", || Action::LoopToggle),
+        ("punch in", || Action::PunchIn),
+        ("punch out", || Action::PunchOut),
+        ("click", || Action::ClickToggle),
+        ("MIDI panic", || Action::MidiPanic),
     ];
     let current = action_label(action);
     egui::ComboBox::from_id_salt(("action", index))
@@ -685,6 +819,16 @@ fn action_editor(ui: &mut egui::Ui, index: usize, action: &mut Action) {
             {
                 *action = Action::LocateMarker(String::new());
             }
+            if ui.selectable_label(matches!(action, Action::JumpBars(_)), "jump bars").clicked() {
+                *action = Action::JumpBars(1.0);
+            }
+            if ui.selectable_label(matches!(action, Action::JumpSeconds(_)), "jump seconds").clicked()
+            {
+                *action = Action::JumpSeconds(10.0);
+            }
+            if ui.selectable_label(matches!(action, Action::SetSpeed(_)), "play at speed").clicked() {
+                *action = Action::SetSpeed(1.0);
+            }
             if ui.selectable_label(matches!(action, Action::AccessAction(_)), "DAW action").clicked() {
                 *action = Action::AccessAction(String::new());
             }
@@ -693,10 +837,28 @@ fn action_editor(ui: &mut egui::Ui, index: usize, action: &mut Action) {
         Action::LocateMarker(name) | Action::AccessAction(name) => {
             ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
         }
+        Action::JumpBars(amount) | Action::JumpSeconds(amount) => {
+            ui.add(egui::DragValue::new(amount).speed(0.5).range(-240.0..=240.0));
+        }
+        Action::SetSpeed(speed) => {
+            ui.add(egui::DragValue::new(speed).speed(0.1).range(-8.0..=8.0).suffix("x"));
+        }
         Action::Osc { address, .. } => {
             ui.label(egui::RichText::new(format!("{address} (edit in the file)")).small().color(DIM));
         }
         _ => {}
+    }
+}
+
+fn led_label(source: LedSource) -> &'static str {
+    match source {
+        LedSource::Playing => "rolling",
+        LedSource::Recording => "recording",
+        LedSource::Stopped => "stopped",
+        LedSource::Looping => "looping",
+        LedSource::PunchIn => "punch in",
+        LedSource::PunchOut => "punch out",
+        LedSource::Click => "click",
     }
 }
 
@@ -714,6 +876,17 @@ fn action_label(action: &Action) -> &'static str {
         Action::AddMarker => "drop marker",
         Action::LocateMarker(_) => "locate marker",
         Action::AccessAction(_) => "DAW action",
+        Action::FastForward => "wind forward",
+        Action::Rewind => "wind back",
+        Action::LoopToggle => "loop",
+        Action::PunchIn => "punch in",
+        Action::PunchOut => "punch out",
+        Action::ClickToggle => "click",
+        Action::AllRecEnable => "arm every track",
+        Action::MidiPanic => "MIDI panic",
+        Action::JumpBars(_) => "jump bars",
+        Action::JumpSeconds(_) => "jump seconds",
+        Action::SetSpeed(_) => "play at speed",
         Action::Osc { .. } => "raw OSC",
     }
 }

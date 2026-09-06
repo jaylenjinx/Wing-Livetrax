@@ -113,9 +113,17 @@ action = {{ locate_marker = "Song 1" }}
 [[transport.buttons]]
 address = "/$ctl/user/1/bu/3"
 action = "add_marker"
+[[transport.buttons]]
+address = "/$ctl/user/1/bu/4"
+action = "loop_toggle"
 [[transport.leds]]
 source = "playing"
 address = "/$ctl/user/1/bu/1/led"
+on = 1
+off = 0
+[[transport.leds]]
+source = "looping"
+address = "/$ctl/user/1/bu/4/led"
 on = 1
 off = 0
 
@@ -207,20 +215,27 @@ def main():
     check("marker -> scene recall", wing.expect("/$ctl/lib/$action",
           pred=lambda a: a[:1] == [1]) is not None)
 
-    # 9. A marker dropped by the bridge is named with the DAW's own timecode.
+    # 9. A user button drives a playback toggle, and its light follows the DAW.
+    wing.send("/$ctl/user/1/bu/4", 1.0)
+    check("user button -> /loop_toggle", daw.expect("/loop_toggle") is not None)
+    daw.send("/loop_toggle", 1)
+    check("loop state -> console light",
+          wing.expect("/$ctl/user/1/bu/4/led", pred=lambda a: a[:1] == [1]) is not None)
+
+    # 10. A marker dropped by the bridge is named with the DAW's own timecode.
     daw.send("/position/smpte", "01:00:05:00")
     time.sleep(0.3)
     wing.send("/$ctl/user/1/bu/3", 1.0)
     check("marker named from the DAW's timecode",
           daw.expect("/add_marker", pred=lambda a: a[:1] == ["01:00:05:00"]) is not None)
 
-    # 10. Scene recall while rolling drops a marker instead of jumping.
+    # 11. Scene recall while rolling drops a marker instead of jumping.
     daw.send("/transport_play", 1)
     time.sleep(0.3)
     wing.send("/$ctl/lib/$actidx", 2)
     check("scene while rolling -> add marker", daw.expect("/add_marker") is not None)
 
-    # 11. A repeated scene index (subscription refresh) must not act again.
+    # 12. A repeated scene index (subscription refresh) must not act again.
     time.sleep(0.3)
     wing.send("/$ctl/lib/$actidx", 2)
     check("repeated scene index ignored", daw.expect("/add_marker", timeout=1.0) is None)

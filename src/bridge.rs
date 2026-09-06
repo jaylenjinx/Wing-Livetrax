@@ -13,7 +13,7 @@ use crate::livetrax::Daw;
 use crate::markers::{self, MarkerTable};
 use crate::osc::{self, Incoming};
 use crate::session;
-use crate::shared::{Command, CommandRx, Cue, CueKind, Shared};
+use crate::shared::{Command, CommandRx, ConsoleEvent, Cue, CueKind, Shared};
 use crate::timecode::{self, Fps};
 use crate::patch::PatchModel;
 use crate::snapfile::SnapFile;
@@ -88,6 +88,14 @@ struct State {
     rename_warned: bool,
     playing: bool,
     recording: bool,
+    looping: bool,
+    punch_in: bool,
+    punch_out: bool,
+    click: bool,
+    speed: f32,
+    session_end: i64,
+    console_events: Vec<ConsoleEvent>,
+    console_seq: u64,
     position: i64,
     current_scene: Option<i32>,
     /// Scene we last acted on, for repeat rate-limiting.
@@ -299,6 +307,10 @@ impl Bridge {
             return Ok(());
         }
 
+        // Whatever is left is a control someone touched, so it is worth
+        // remembering: this is the list a binding is learned from.
+        self.remember_console_event(addr, &inc.msg.args);
+
         if self.cfg.transport.enabled {
             // Cloned so the borrow of self.cfg ends before the action runs.
             let hits: Vec<Action> = self
@@ -347,6 +359,28 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+
+    /// Keep the last few console controls that were touched. Channel names and
+    /// patch replies are excluded - this is the list you pick a button from.
+    fn remember_console_event(&mut self, addr: &str, args: &[OscType]) {
+        let value = args.first().and_then(osc::as_f32).unwrap_or(1.0);
+        self.st.console_seq += 1;
+        let seq = self.st.console_seq;
+        if let Some(existing) = self.st.console_events.iter_mut().find(|e| e.address == addr) {
+            existing.seq = seq;
+            existing.value = value;
+        } else {
+            self.st.console_events.push(ConsoleEvent {
+                seq,
+                address: addr.to_string(),
+                value,
+            });
+        }
+        self.st.console_events.sort_by_key(|e| e.seq);
+        while self.st.console_events.len() > 60 {
+            self.st.console_events.remove(0);
+        }
     }
 
     fn on_wing_name(&mut self, ch: u16, name: &str) {
@@ -459,9 +493,26 @@ impl Bridge {
                     self.set_playing(false).await?;
                 }
             }
-            "/rec_enable_toggle" | "/record_tally" | "/transport_record" => {
+            "/rec_enable_toggle" | "/record_tally" | "/record_enabled" | "/transport_record" => {
                 let on = args.first().and_then(osc::as_f32).unwrap_or(0.0) > 0.5;
                 self.set_recording(on).await?;
+            }
+            // The DAW echoes these back as its state changes, however it was
+            // changed - from here, from its own window, or from a key.
+            "/loop_toggle" | "/toggle_punch_in" | "/toggle_punch_out" | "/toggle_click" => {
+                let on = args.first().and_then(osc::as_f32).unwrap_or(0.0) > 0.5;
+                match addr {
+                    "/loop_toggle" => self.st.looping = on,
+                    "/toggle_punch_in" => self.st.punch_in = on,
+                    "/toggle_punch_out" => self.st.punch_out = on,
+                    _ => self.st.click = on,
+                }
+                self.update_leds().await?;
+            }
+            "/transport_speed" => {
+                if let Some(speed) = args.first().and_then(osc::as_f32) {
+                    self.st.speed = speed;
+                }
             }
             "/position/samples" => {
                 if let Some(p) = args.first().and_then(osc::as_i64) {
@@ -511,6 +562,13 @@ impl Bridge {
             if let Some(sr) = args.get(1).and_then(osc::as_i64) {
                 if sr > 0 {
                     self.markers.sample_rate = Some(sr as f64);
+                }
+            }
+            // The reply ends with the session's last sample, which is what the
+            // scrub bar needs for its range.
+            if let Some(end) = args.get(2).and_then(osc::as_i64) {
+                if end > 0 {
+                    self.st.session_end = end;
                 }
             }
             if !self.st.strip_list_seen {
@@ -627,6 +685,10 @@ impl Bridge {
                 LedSource::Playing => self.st.playing,
                 LedSource::Recording => self.st.recording,
                 LedSource::Stopped => !self.st.playing,
+                LedSource::Looping => self.st.looping,
+                LedSource::PunchIn => self.st.punch_in,
+                LedSource::PunchOut => self.st.punch_out,
+                LedSource::Click => self.st.click,
             };
             let arg = if on { led.on.to_osc() } else { led.off.to_osc() };
             self.wing.send_raw(&led.address, vec![arg]).await?;
@@ -661,6 +723,17 @@ impl Bridge {
                     self.log_cue(CueKind::Marker, name);
                 }
             }
+            Action::FastForward => self.daw.fast_forward().await?,
+            Action::Rewind => self.daw.rewind().await?,
+            Action::LoopToggle => self.daw.loop_toggle().await?,
+            Action::PunchIn => self.daw.punch_in().await?,
+            Action::PunchOut => self.daw.punch_out().await?,
+            Action::ClickToggle => self.daw.click_toggle().await?,
+            Action::AllRecEnable => self.daw.all_rec_enable().await?,
+            Action::MidiPanic => self.daw.midi_panic().await?,
+            Action::JumpBars(bars) => self.daw.jump_bars(*bars).await?,
+            Action::JumpSeconds(seconds) => self.daw.jump_seconds(*seconds).await?,
+            Action::SetSpeed(speed) => self.daw.set_speed(*speed).await?,
             Action::AccessAction(a) => self.daw.access_action(a).await?,
             Action::LocateMarker(name) => match self.markers.find(name) {
                 Some(m) => {
@@ -1073,6 +1146,9 @@ impl Bridge {
                     None => tracing::warn!("{tc} is before the start of the session"),
                 }
             }
+            Command::LocateSamples(samples) => {
+                self.daw.locate(samples.max(0), false).await?;
+            }
             Command::ExportCues(path) => {
                 let csv = self.cues_as_csv();
                 let count = self.st.cues.len();
@@ -1152,9 +1228,18 @@ impl Bridge {
             .unwrap_or(self.cfg.livetrax.sample_rate);
         s.timecode = Some(self.now_timecode());
         s.fps = self.fps().label().to_string();
+        s.fps_value = self.fps();
+        s.tc_offset_frames = self.offset_frames();
         s.cues = self.st.cues.clone();
         s.playing = self.st.playing;
         s.recording = self.st.recording;
+        s.looping = self.st.looping;
+        s.punch_in = self.st.punch_in;
+        s.punch_out = self.st.punch_out;
+        s.click = self.st.click;
+        s.speed = self.st.speed;
+        s.session_end = self.st.session_end;
+        s.console_events = self.st.console_events.clone();
         s.position = self.st.position;
         s.current_scene = self.st.current_scene;
         s.current_marker = self.st.current_marker.clone();
@@ -1487,6 +1572,89 @@ max_len_wing = 6
             .await
             .unwrap();
         assert_eq!(bridge.now_timecode(), "10:00:01:00");
+    }
+
+    #[tokio::test]
+    async fn playback_actions_reach_the_daw() {
+        let (mut bridge, _wing, daw) = harness().await;
+        for (action, address) in [
+            (Action::LoopToggle, "/loop_toggle"),
+            (Action::PunchIn, "/toggle_punch_in"),
+            (Action::PunchOut, "/toggle_punch_out"),
+            (Action::ClickToggle, "/toggle_click"),
+            (Action::Rewind, "/rewind"),
+            (Action::FastForward, "/ffwd"),
+            (Action::AllRecEnable, "/toggle_all_rec_enables"),
+            (Action::JumpBars(-1.0), "/jump_bars"),
+            (Action::JumpSeconds(10.0), "/jump_seconds"),
+            (Action::SetSpeed(0.5), "/set_transport_speed"),
+        ] {
+            bridge.on_command(Command::Transport(action)).await.unwrap();
+            assert_eq!(recv(&daw).expect("something should have been sent").addr, address);
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_state_follows_the_daw_and_lights_the_console() {
+        let (mut bridge, wing, _daw) = harness().await;
+        bridge.cfg.transport.leds = vec![crate::config::LedMap {
+            source: LedSource::Looping,
+            address: "/$ctl/user/1/bu/5/led".into(),
+            on: crate::config::Arg::Int(1),
+            off: crate::config::Arg::Int(0),
+        }];
+
+        // The DAW says it is looping, whoever turned it on.
+        bridge
+            .on_daw(Incoming {
+                from: "127.0.0.1:1".parse().unwrap(),
+                msg: rosc::OscMessage {
+                    addr: "/loop_toggle".into(),
+                    args: vec![OscType::Int(1)],
+                },
+            })
+            .await
+            .unwrap();
+        assert!(bridge.st.looping);
+
+        let msg = recv(&wing).expect("the light should have followed");
+        assert_eq!(msg.addr, "/$ctl/user/1/bu/5/led");
+        assert_eq!(msg.args[0], OscType::Int(1));
+    }
+
+    #[tokio::test]
+    async fn console_controls_are_remembered_for_learning() {
+        let (mut bridge, _wing, _daw) = harness().await;
+        let press = |addr: &str, value: f32| Incoming {
+            from: "127.0.0.1:1".parse().unwrap(),
+            msg: rosc::OscMessage {
+                addr: addr.into(),
+                args: vec![OscType::Float(value)],
+            },
+        };
+        bridge.on_wing(press("/$ctl/user/1/bu/7", 1.0)).await.unwrap();
+        bridge.on_wing(press("/$ctl/user/1/bu/7", 0.0)).await.unwrap();
+        bridge.on_wing(press("/$ctl/user/1/bu/8", 1.0)).await.unwrap();
+
+        let events = &bridge.st.console_events;
+        assert_eq!(events.len(), 2, "one entry per control, not per message");
+        assert_eq!(events.last().unwrap().address, "/$ctl/user/1/bu/8");
+        // The release updated the first entry rather than adding to it.
+        assert_eq!(events[0].value, 0.0);
+        assert!(events[1].seq > events[0].seq);
+
+        // A channel name is not a control and must not clutter the list.
+        bridge
+            .on_wing(Incoming {
+                from: "127.0.0.1:1".parse().unwrap(),
+                msg: rosc::OscMessage {
+                    addr: "/ch/1/name".into(),
+                    args: vec![OscType::String("KICK".into())],
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(bridge.st.console_events.len(), 2);
     }
 
     #[tokio::test]
