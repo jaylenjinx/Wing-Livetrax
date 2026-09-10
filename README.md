@@ -507,6 +507,17 @@ The frame rate and session start come from the session file
 * **Show log** — markers, scene recalls and (optionally) takes, each stamped
   with the timecode they happened at, exportable as CSV for the edit.
 
+### Getting told what is wrong
+
+When an end goes quiet for ten seconds the window says so across the top, with
+what to do about it — for LiveTrax, that its OSC surface needs turning on — and
+a button that opens preferences at the right section. It waits a few seconds
+after launch first, so it does not flash on every start.
+
+Keys: **space** starts and stops, **Cmd-1** to **Cmd-7** pick a tab, **Cmd-R**
+asks both ends again, **Cmd-,** opens preferences. Typing in a field takes the
+keys back, so naming a session cannot start a take.
+
 ## Preferences
 
 Everything in the config file is editable in the app: **Preferences** in the

@@ -59,6 +59,25 @@ pub fn run(
     .map_err(|e| anyhow::anyhow!("GUI: {e}"))
 }
 
+/// The end of the bridge that has gone quiet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Console,
+    LiveTrax,
+    Both,
+}
+
+/// The tabs, in order: the bar and the Cmd-number shortcuts share this.
+const TABS: [(Tab, &str); 7] = [
+    (Tab::Channels, "Channels"),
+    (Tab::Transport, "Transport"),
+    (Tab::Scenes, "Scenes & markers"),
+    (Tab::NewSession, "New session"),
+    (Tab::Snapshot, "WING snapshot"),
+    (Tab::PatchSheet, "Patch sheet"),
+    (Tab::Log, "Log"),
+];
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Channels,
@@ -241,6 +260,8 @@ struct App {
     tc_input: String,
     /// Where the scrub bar is being dragged to, while it is being dragged.
     scrubbing: Option<i64>,
+    /// When the window opened, so a quiet end is given a moment to answer.
+    started: std::time::Instant,
     prefs: Prefs,
     snap: Snapshot,
 }
@@ -260,6 +281,7 @@ impl App {
             sheet_form: SheetForm::new(&cfg),
             tc_input: String::new(),
             scrubbing: None,
+            started: std::time::Instant::now(),
             prefs: Prefs::new(&cfg),
             shared,
             tx,
@@ -315,6 +337,7 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.prefs.open_with(&self.cfg);
         }
+        self.shortcuts(ui);
         for command in self.prefs.show(ui.ctx(), &self.cfg_path, &self.snap.console_events) {
             if let Command::ApplyConfig(config) = &command {
                 self.cfg = (**config).clone();
@@ -328,6 +351,15 @@ impl eframe::App for App {
         egui::Panel::top("tabs")
             .frame(tabs_frame())
             .show(ui, |ui| self.tab_bar(ui));
+        if self.quiet_end().is_some() {
+            egui::Panel::top("attention")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::CARD)
+                        .inner_margin(egui::Margin::symmetric(14, 7)),
+                )
+                .show(ui, |ui| self.attention(ui));
+        }
         egui::Panel::bottom("status")
             .frame(bar_frame())
             .show(ui, |ui| self.status_bar(ui));
@@ -364,7 +396,11 @@ impl App {
             ui.add_space(6.0);
 
             let rolling = self.snap.playing;
-            if ui.add(theme::primary(if rolling { "Stop" } else { "Play" })).clicked() {
+            if ui
+                .add(theme::primary(if rolling { "Stop" } else { "Play" }))
+                .on_hover_text("Space")
+                .clicked()
+            {
                 self.send(Command::Transport(if rolling { Action::Stop } else { Action::Play }));
             }
             theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
@@ -410,8 +446,91 @@ impl App {
                 chip(ui, "click");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Preferences").clicked() {
+                if ui.button("Preferences").on_hover_text("Cmd-,").clicked() {
                     self.prefs.open_with(&self.cfg);
+                }
+            });
+        });
+    }
+
+    /// Keys you would reach for without being told: space for the transport,
+    /// Cmd-1..7 for the tabs, Cmd-R to ask both ends again. Skipped while a
+    /// text field has focus, so typing a session name does not start a take.
+    fn shortcuts(&mut self, ui: &mut egui::Ui) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+            self.send(Command::Transport(if self.snap.playing {
+                Action::Stop
+            } else {
+                Action::Play
+            }));
+        }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+            self.send(Command::QueryWingNames);
+            self.send(Command::RefreshDaw);
+        }
+        const KEYS: [egui::Key; 7] = [
+            egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4,
+            egui::Key::Num5, egui::Key::Num6, egui::Key::Num7,
+        ];
+        for (i, key) in KEYS.iter().enumerate() {
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, *key)) {
+                if let Some((tab, _)) = TABS.get(i) {
+                    self.tab = *tab;
+                }
+            }
+        }
+    }
+
+    /// Which end has gone quiet, once the app has had a moment to connect.
+    /// Nothing is reported in the first few seconds - a banner that flashes on
+    /// every launch is one people learn to ignore.
+    fn quiet_end(&self) -> Option<End> {
+        if self.started.elapsed() < Duration::from_secs(4) {
+            return None;
+        }
+        let stale = |at: Option<std::time::Instant>| {
+            at.map(|t| t.elapsed() > Duration::from_secs(10)).unwrap_or(true)
+        };
+        match (stale(self.snap.last_wing_rx), stale(self.snap.last_daw_rx)) {
+            (true, true) => Some(End::Both),
+            (true, false) => Some(End::Console),
+            (false, true) => Some(End::LiveTrax),
+            (false, false) => None,
+        }
+    }
+
+    fn attention(&mut self, ui: &mut egui::Ui) {
+        let Some(end) = self.quiet_end() else { return };
+        ui.horizontal_wrapped(|ui| {
+            theme::dot(ui, AMBER);
+            let (what, fix, section) = match end {
+                End::Both => (
+                    "Neither the console nor LiveTrax is answering.".to_string(),
+                    "Check both addresses in preferences, and that this Mac is on the same network."
+                        .to_string(),
+                    "console",
+                ),
+                End::Console => (
+                    format!("The console is not answering on {}.", self.snap.wing_target),
+                    "Check the address, and that the desk is on this network.".to_string(),
+                    "console",
+                ),
+                End::LiveTrax => (
+                    format!("LiveTrax is not answering on {}.", self.snap.daw_target),
+                    "In LiveTrax: Preferences > Control Surfaces > tick Open Sound Control (OSC)."
+                        .to_string(),
+                    "livetrax",
+                ),
+            };
+            ui.label(egui::RichText::new(what).color(TEXT));
+            ui.label(egui::RichText::new(fix).small().color(DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Open preferences").clicked() {
+                    let cfg = self.cfg.clone();
+                    self.prefs.open_at(&cfg, section);
                 }
             });
         });
@@ -420,18 +539,15 @@ impl App {
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
-            for (tab, label) in [
-                (Tab::Channels, "Channels"),
-                (Tab::Transport, "Transport"),
-                (Tab::Scenes, "Scenes & markers"),
-                (Tab::NewSession, "New session"),
-                (Tab::Snapshot, "WING snapshot"),
-                (Tab::PatchSheet, "Patch sheet"),
-                (Tab::Log, "Log"),
-            ] {
+            for (i, (tab, label)) in TABS.iter().enumerate() {
+                let (tab, label) = (*tab, *label);
                 let selected = self.tab == tab;
                 let text = egui::RichText::new(label).color(if selected { TEXT } else { DIM });
-                if ui.selectable_label(selected, text).clicked() {
+                if ui
+                    .selectable_label(selected, text)
+                    .on_hover_text(format!("Cmd-{}", i + 1))
+                    .clicked()
+                {
                     self.tab = tab;
                 }
             }
@@ -470,16 +586,16 @@ impl App {
 
         theme::titled_card(ui, "CHANNEL NAMES", |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Read names from console").clicked() {
+                if ui.button("Read names from console").on_hover_text("Ask the console for every channel name now. Cmd-R does both ends.").clicked() {
                     self.send(Command::QueryWingNames);
                 }
-                if ui.button("Push console -> DAW").clicked() {
+                if ui.button("Push console -> DAW").on_hover_text("Send every console name to LiveTrax now, whatever the sync direction says.").clicked() {
                     self.send(Command::PushNamesToDaw);
                 }
-                if ui.button("Push DAW -> console").clicked() {
+                if ui.button("Push DAW -> console").on_hover_text("Send every LiveTrax track name to the console now.").clicked() {
                     self.send(Command::PushNamesToWing);
                 }
-                if ui.button("Refresh strip list").clicked() {
+                if ui.button("Refresh strip list").on_hover_text("Ask LiveTrax for its tracks again, after adding or renaming some.").clicked() {
                     self.send(Command::RefreshDaw);
                 }
             });
@@ -577,7 +693,7 @@ impl App {
                             }
                         }
                     });
-                if ui.button("Ask the console").clicked() {
+                if ui.button("Ask the console").on_hover_text("Query the desk's output patch over OSC. A few hundred small messages, about a second.").clicked() {
                     self.query_console_patch();
                 }
                 if self
@@ -753,7 +869,11 @@ impl App {
                 if ui.button("<< Back").clicked() {
                     self.send(Command::Transport(Action::Rewind));
                 }
-                if ui.add(theme::primary(if rolling { "Stop" } else { "Play" })).clicked() {
+                if ui
+                .add(theme::primary(if rolling { "Stop" } else { "Play" }))
+                .on_hover_text("Space")
+                .clicked()
+            {
                     self.send(Command::Transport(if rolling {
                         Action::Stop
                     } else {
@@ -1150,7 +1270,7 @@ impl App {
                 })));
             }
             ui.label(egui::RichText::new(format!("{} tracks", tracks.len())).color(DIM));
-            if ui.button("Read names from console").clicked() {
+            if ui.button("Read names from console").on_hover_text("Ask the console for every channel name now. Cmd-R does both ends.").clicked() {
                 self.send(Command::QueryWingNames);
             }
             if self.snap.session_busy {
