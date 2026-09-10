@@ -1,0 +1,80 @@
+# Publish docs/ to GitHub Pages.
+#
+# The site is hand-written HTML with its screenshots beside it, so "building"
+# it is assembling the folder, checking every image the page asks for is
+# actually there, and running the repo's own bundler to leave a single-file
+# copy at /site.html for sharing somewhere with no place to put the images.
+name: Documentation site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  # Docs changes arriving by pull request are built but not published, so a
+  # broken image reference fails before it can reach the live site.
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one that is already running: a
+# half-finished Pages deployment is worse than a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every image the page references is present
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          html = open("docs/index.html", encoding="utf-8").read()
+          wanted = sorted(set(re.findall(r'src="([^"]+\.(?:png|jpg|jpeg|svg))"', html)))
+          missing = [n for n in wanted if not os.path.isfile(os.path.join("docs", n))]
+          if missing:
+              print("missing from docs/: " + ", ".join(missing), file=sys.stderr)
+              sys.exit(1)
+          print(f"{len(wanted)} images, all present")
+          PY
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp -R docs/. _site/
+          rm -f _site/build_site.py
+          python3 docs/build_site.py _site/site.html
+          # Pages runs Jekyll over an uploaded folder unless told not to, and
+          # nothing here wants processing.
+          touch _site/.nojekyll
+          ls -la _site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

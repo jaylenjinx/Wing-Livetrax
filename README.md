@@ -34,8 +34,16 @@ the console's network, or on a separate box.
 ## Documentation
 
 Full documentation lives in [`docs/`](docs/index.html) — open it locally, or
-serve the folder with GitHub Pages. `python3 docs/build_site.py` bundles the
-same page into a single self-contained file.
+read it at **<https://jaylenjinx.github.io/Wing-Livetrax/>**, which
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) publishes on every
+push that touches `docs/`. The same workflow leaves a single-file copy, images
+and all, at [`/site.html`](https://jaylenjinx.github.io/Wing-Livetrax/site.html)
+for sharing somewhere with no place to put the screenshots;
+`python3 docs/build_site.py` produces it locally.
+
+A docs change arriving by pull request is built but not published, so an image
+the page asks for and the repo does not have fails the run rather than reaching
+the live site.
 
 ## Build
 
