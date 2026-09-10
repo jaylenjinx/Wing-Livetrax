@@ -217,3 +217,12 @@ marker_template = "{tc}"
 log = true                 # keep a timecode-stamped show log
 log_transport = false      # log takes starting and stopping as well
 log_limit = 2000
+
+# ----------------------------------------------------------- appearance ---
+[appearance]
+# midnight  near-black, teal accent (the default)
+# slate     softer and bluer, for a lit room
+# daylight  light, for daylight and projectors
+# amber     nothing bright: a stage at night
+# contrast  hard edges for tired eyes and bad screens
+theme = "midnight"

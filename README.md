@@ -507,6 +507,14 @@ The frame rate and session start come from the session file
 * **Show log** — markers, scene recalls and (optionally) takes, each stamped
   with the timecode they happened at, exportable as CSV for the edit.
 
+### Themes
+
+Five of them, in Preferences ▸ Appearance: **Midnight** (near-black, teal, the
+default), **Slate** (softer and bluer for a lit room), **Daylight** (light, for
+daylight and projectors), **Amber** (nothing bright, for a stage at night) and
+**High contrast**. Picking one shows it immediately; *Save to file* keeps it,
+or set `[appearance] theme` in the config.
+
 ### Getting told what is wrong
 
 When an end goes quiet for ten seconds the window says so across the top, with

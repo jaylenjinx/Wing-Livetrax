@@ -17,7 +17,7 @@ use crate::snapfile::SnapFile;
 use crate::snapshot::{self, SnapshotRequest};
 use crate::shared::{Command, CommandTx, LogBuffer, Shared, Snapshot};
 
-use crate::theme::{self, ACCENT, AMBER, DIM, GREEN, RED, TEXT};
+use crate::theme;
 
 pub fn run(
     shared: Shared,
@@ -36,6 +36,7 @@ pub fn run(
         viewport = viewport.with_position(pos);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let start_theme = cfg.appearance.theme;
     let mut app = App::new(shared, tx, log, cfg, cfg_path);
     if let Some(tab) = start_tab {
         // "preferences" opens the window rather than switching tabs, and
@@ -52,7 +53,7 @@ pub fn run(
         "WING <-> LiveTrax Bridge",
         options,
         Box::new(move |cc| {
-            theme::install(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, start_theme);
             Ok(Box::new(app))
         }),
     )
@@ -327,6 +328,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::bg().to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         if let Ok(s) = self.shared.lock() {
@@ -355,7 +360,7 @@ impl eframe::App for App {
             egui::Panel::top("attention")
                 .frame(
                     egui::Frame::new()
-                        .fill(theme::CARD)
+                        .fill(theme::surface())
                         .inner_margin(egui::Margin::symmetric(14, 7)),
                 )
                 .show(ui, |ui| self.attention(ui));
@@ -364,7 +369,11 @@ impl eframe::App for App {
             .frame(bar_frame())
             .show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::bg())
+                    .inner_margin(egui::Margin::symmetric(14, 10)),
+            )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -403,7 +412,7 @@ impl App {
             {
                 self.send(Command::Transport(if rolling { Action::Stop } else { Action::Play }));
             }
-            theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
+            theme::dot(ui, if self.snap.recording { theme::bad() } else { theme::line() });
             if ui.button("Rec arm").clicked() {
                 self.send(Command::Transport(Action::RecordArmToggle));
             }
@@ -424,10 +433,10 @@ impl App {
                 )
                 .monospace()
                 .size(16.0)
-                .color(if rolling { GREEN } else { TEXT }),
+                .color(if rolling { theme::good() } else { theme::text() }),
             );
             if !self.snap.fps.is_empty() {
-                ui.label(egui::RichText::new(format!("{} fps", self.snap.fps)).small().color(DIM));
+                ui.label(egui::RichText::new(format!("{} fps", self.snap.fps)).small().color(theme::dim()));
             }
 
             if let Some(marker) = self.snap.current_marker.clone() {
@@ -505,7 +514,7 @@ impl App {
     fn attention(&mut self, ui: &mut egui::Ui) {
         let Some(end) = self.quiet_end() else { return };
         ui.horizontal_wrapped(|ui| {
-            theme::dot(ui, AMBER);
+            theme::dot(ui, theme::warn());
             let (what, fix, section) = match end {
                 End::Both => (
                     "Neither the console nor LiveTrax is answering.".to_string(),
@@ -525,8 +534,8 @@ impl App {
                     "livetrax",
                 ),
             };
-            ui.label(egui::RichText::new(what).color(TEXT));
-            ui.label(egui::RichText::new(fix).small().color(DIM));
+            ui.label(egui::RichText::new(what).color(theme::text()));
+            ui.label(egui::RichText::new(fix).small().color(theme::dim()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Open preferences").clicked() {
                     let cfg = self.cfg.clone();
@@ -542,7 +551,7 @@ impl App {
             for (i, (tab, label)) in TABS.iter().enumerate() {
                 let (tab, label) = (*tab, *label);
                 let selected = self.tab == tab;
-                let text = egui::RichText::new(label).color(if selected { TEXT } else { DIM });
+                let text = egui::RichText::new(label).color(if selected { theme::text() } else { theme::dim() });
                 if ui
                     .selectable_label(selected, text)
                     .on_hover_text(format!("Cmd-{}", i + 1))
@@ -564,13 +573,13 @@ impl App {
                     self.snap.wing_msgs + self.snap.daw_msgs
                 ))
                 .small()
-                .color(DIM),
+                .color(theme::dim()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(self.cfg_path.display().to_string())
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             });
         });
@@ -625,7 +634,7 @@ impl App {
                         let wing = self.snap.wing_names.get(ch).cloned().unwrap_or_default();
                         let daw = self.snap.strips.get(ssid).cloned().unwrap_or_default();
                         theme::num(ui, ch.to_string());
-                        cell(ui, 150.0, egui::RichText::new(&wing).color(TEXT));
+                        cell(ui, 150.0, egui::RichText::new(&wing).color(theme::text()));
                         if patched {
                             let source = self
                                 .snap
@@ -634,16 +643,16 @@ impl App {
                                 .find(|s| s.channel == Some(*ch))
                                 .map(|s| s.source.clone())
                                 .unwrap_or_default();
-                            cell(ui, 90.0, egui::RichText::new(source).color(DIM).monospace());
+                            cell(ui, 90.0, egui::RichText::new(source).color(theme::dim()).monospace());
                         }
                         theme::num(ui, ssid.to_string());
-                        cell(ui, 150.0, egui::RichText::new(&daw).color(TEXT));
+                        cell(ui, 150.0, egui::RichText::new(&daw).color(theme::text()));
                         let (mark, color) = if wing.is_empty() && daw.is_empty() {
-                            ("", DIM)
+                            ("", theme::dim())
                         } else if !wing.is_empty() && wing == daw {
-                            ("=", GREEN)
+                            ("=", theme::good())
                         } else {
-                            ("!=", AMBER)
+                            ("!=", theme::warn())
                         };
                         ui.label(egui::RichText::new(mark).color(color).monospace());
                         ui.end_row();
@@ -762,7 +771,7 @@ impl App {
 
         ui.add_space(2.0);
         if let Some(err) = &self.patch_form.error {
-            ui.label(egui::RichText::new(format!("error: {err}")).color(RED).small());
+            ui.label(egui::RichText::new(format!("error: {err}")).color(theme::bad()).small());
         } else if let Some(summary) = &self.snap.patch_summary {
             let extra = if live {
                 String::new()
@@ -773,7 +782,7 @@ impl App {
                 egui::RichText::new(format!(
                     "{summary}{extra}. DAW strip N is output N of this group."
                 ))
-                .color(DIM)
+                .color(theme::dim())
                 .small(),
             );
         } else if live {
@@ -782,7 +791,7 @@ impl App {
                     "Waiting for the console. If nothing arrives, check wing.host and the \
                      [patch.live] addresses - `probe --target wing` shows what it really sends.",
                 )
-                .color(AMBER)
+                .color(theme::warn())
                 .small(),
             );
         } else {
@@ -790,7 +799,7 @@ impl App {
                 egui::RichText::new(
                     "No patch loaded - strips are mapped straight from channel numbers.",
                 )
-                .color(DIM)
+                .color(theme::dim())
                 .small(),
             );
         }
@@ -839,7 +848,7 @@ impl App {
                 }
                 if !self.tc_input.trim().is_empty() && parsed.is_none() {
                     ui.label(
-                        egui::RichText::new("hours:minutes:seconds:frames").small().color(AMBER),
+                        egui::RichText::new("hours:minutes:seconds:frames").small().color(theme::warn()),
                     );
                 } else {
                     ui.label(
@@ -848,7 +857,7 @@ impl App {
                             self.snap.fps, self.snap.sample_rate
                         ))
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                     );
                 }
             });
@@ -887,7 +896,7 @@ impl App {
                     self.send(Command::Transport(Action::GotoEnd));
                 }
                 ui.add_space(8.0);
-                theme::dot(ui, if self.snap.recording { RED } else { theme::LINE });
+                theme::dot(ui, if self.snap.recording { theme::bad() } else { theme::line() });
                 if ui.button("Rec arm").clicked() {
                     self.send(Command::Transport(Action::RecordArmToggle));
                 }
@@ -904,7 +913,7 @@ impl App {
                     ("Punch out", self.snap.punch_out, Action::PunchOut),
                     ("Click", self.snap.click, Action::ClickToggle),
                 ] {
-                    let text = egui::RichText::new(label).color(if active { TEXT } else { DIM });
+                    let text = egui::RichText::new(label).color(if active { theme::text() } else { theme::dim() });
                     if ui.selectable_label(active, text).clicked() {
                         self.send(Command::Transport(action));
                     }
@@ -1020,7 +1029,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("markers, scene recalls and takes, stamped with timecode")
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             });
             ui.add_space(4.0);
@@ -1043,14 +1052,14 @@ impl App {
                                 ui.label(
                                     egui::RichText::new(cue.kind.label()).small().color(
                                         match cue.kind {
-                                            crate::shared::CueKind::TakeStart => GREEN,
-                                            crate::shared::CueKind::TakeStop => DIM,
-                                            crate::shared::CueKind::Scene => ACCENT,
-                                            crate::shared::CueKind::Marker => TEXT,
+                                            crate::shared::CueKind::TakeStart => theme::good(),
+                                            crate::shared::CueKind::TakeStop => theme::dim(),
+                                            crate::shared::CueKind::Scene => theme::accent(),
+                                            crate::shared::CueKind::Marker => theme::text(),
                                         },
                                     ),
                                 );
-                                cell(ui, 260.0, egui::RichText::new(&cue.detail).color(TEXT));
+                                cell(ui, 260.0, egui::RichText::new(&cue.detail).color(theme::text()));
                                 ui.end_row();
                             }
                         },
@@ -1077,7 +1086,7 @@ impl App {
                     None => "no session file configured - marker positions are unknown".into(),
                 })
                 .small()
-                .color(DIM),
+                .color(theme::dim()),
             );
         });
         ui.add_space(10.0);
@@ -1102,11 +1111,11 @@ impl App {
                             .iter()
                             .any(|(n, _)| n.eq_ignore_ascii_case(marker));
                         theme::num(ui, scene.to_string());
-                        cell(ui, 160.0, egui::RichText::new(marker).color(TEXT));
+                        cell(ui, 160.0, egui::RichText::new(marker).color(theme::text()));
                         ui.label(
                             egui::RichText::new(if known { "marker found" } else { "not in session" })
                                 .small()
-                                .color(if known { GREEN } else { AMBER }),
+                                .color(if known { theme::good() } else { theme::warn() }),
                         );
                         ui.horizontal(|ui| {
                             if ui.small_button("Recall on console").clicked() {
@@ -1132,7 +1141,7 @@ impl App {
                 ui,
                 |ui| {
                     for (name, pos) in &self.snap.markers {
-                        cell(ui, 200.0, egui::RichText::new(name).color(TEXT));
+                        cell(ui, 200.0, egui::RichText::new(name).color(theme::text()));
                         theme::num(ui, timecode(*pos, self.snap.sample_rate));
                         if ui.small_button("Locate").clicked() {
                             self.send(Command::LocateMarker(name.clone()));
@@ -1151,7 +1160,7 @@ impl App {
                 theme::field(ui, if patched && self.form.use_patch { "Outputs" } else { "Channels" });
                 let max_ch = self.cfg.wing.channels.max(1);
                 ui.add(egui::DragValue::new(&mut self.form.first_ch).range(1..=max_ch));
-                ui.label(egui::RichText::new("to").color(DIM));
+                ui.label(egui::RichText::new("to").color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut self.form.last_ch).range(1..=max_ch));
                 ui.add_space(8.0);
                 ui.checkbox(&mut self.form.include_unnamed, "include unnamed");
@@ -1161,13 +1170,13 @@ impl App {
             });
             if patched && self.form.use_patch {
                 if let Some(summary) = &self.snap.patch_summary {
-                    ui.label(egui::RichText::new(summary).small().color(DIM));
+                    ui.label(egui::RichText::new(summary).small().color(theme::dim()));
                 }
             } else if !patched {
                 ui.label(
                     egui::RichText::new("No patch loaded, so tracks follow console channel order.")
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             }
         });
@@ -1236,7 +1245,7 @@ impl App {
                             "No installed templates found - point at any saved session with an audio track.",
                         )
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                     );
                 });
             }
@@ -1269,7 +1278,7 @@ impl App {
                     allow_minimal: self.form.allow_minimal,
                 })));
             }
-            ui.label(egui::RichText::new(format!("{} tracks", tracks.len())).color(DIM));
+            ui.label(egui::RichText::new(format!("{} tracks", tracks.len())).color(theme::dim()));
             if ui.button("Read names from console").on_hover_text("Ask the console for every channel name now. Cmd-R does both ends.").clicked() {
                 self.send(Command::QueryWingNames);
             }
@@ -1288,29 +1297,29 @@ impl App {
                             r.session_file.display(),
                             r.tracks
                         ))
-                        .color(GREEN),
+                        .color(theme::good()),
                     );
                     ui.label(
                         egui::RichText::new(format!("folder: {}", r.folder.display()))
                             .small()
-                            .color(DIM),
+                            .color(theme::dim()),
                     );
                     if let Some(t) = &r.template {
-                        ui.label(egui::RichText::new(format!("cloned from {}", t.display())).small().color(DIM));
+                        ui.label(egui::RichText::new(format!("cloned from {}", t.display())).small().color(theme::dim()));
                     }
                     for w in &r.warnings {
-                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(AMBER));
+                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(theme::warn()));
                     }
                     ui.label(
                         egui::RichText::new(
                             "Open it in LiveTrax with Session > Open. The bridge now follows it for markers.",
                         )
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                     );
                 }
                 Err(e) => {
-                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(theme::bad()));
                 }
             });
         }
@@ -1326,7 +1335,7 @@ impl App {
                 |ui| {
                     for (i, name) in tracks.iter().enumerate() {
                         theme::num(ui, format!("{}", i + 1));
-                        cell(ui, 260.0, egui::RichText::new(name).color(TEXT));
+                        cell(ui, 260.0, egui::RichText::new(name).color(theme::text()));
                         ui.end_row();
                     }
                 },
@@ -1349,7 +1358,7 @@ impl App {
                      With a .snap template the result is a genuine snapshot - only the names change.",
                 )
                 .small()
-                .color(DIM),
+                .color(theme::dim()),
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1379,11 +1388,11 @@ impl App {
                     } else {
                         "first channel"
                     })
-                    .color(DIM),
+                    .color(theme::dim()),
                 );
                 let max_ch = self.cfg.wing.channels.max(1);
                 ui.add(egui::DragValue::new(&mut self.snap_form.first_ch).range(1..=max_ch));
-                ui.label(egui::RichText::new("name length").color(DIM));
+                ui.label(egui::RichText::new("name length").color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut self.snap_form.max_len).range(0..=32));
                 ui.checkbox(&mut self.snap_form.include_busses, "include busses");
             });
@@ -1461,7 +1470,7 @@ impl App {
                 self.snap_form.report =
                     Some(Ok(format!("sent {} channel names to the console", entries.len())));
             }
-            ui.label(egui::RichText::new(format!("{} channels", entries.len())).color(DIM));
+            ui.label(egui::RichText::new(format!("{} channels", entries.len())).color(theme::dim()));
             if !skipped.is_empty() {
                 ui.label(
                     egui::RichText::new(format!(
@@ -1469,7 +1478,7 @@ impl App {
                         skipped.len()
                     ))
                     .small()
-                    .color(AMBER),
+                    .color(theme::warn()),
                 );
             }
         });
@@ -1477,8 +1486,8 @@ impl App {
         if let Some(report) = &self.snap_form.report {
             ui.add_space(6.0);
             match report {
-                Ok(msg) => ui.label(egui::RichText::new(msg.clone()).color(GREEN)),
-                Err(e) => ui.label(egui::RichText::new(format!("error: {e}")).color(RED)),
+                Ok(msg) => ui.label(egui::RichText::new(msg.clone()).color(theme::good())),
+                Err(e) => ui.label(egui::RichText::new(format!("error: {e}")).color(theme::bad())),
             };
         }
 
@@ -1499,12 +1508,12 @@ impl App {
                     for e in &entries {
                         theme::num(ui, e.output.map(|o| o.to_string()).unwrap_or_else(|| "-".into()));
                         theme::num(ui, e.channel.to_string());
-                        cell(ui, 200.0, egui::RichText::new(&e.track).color(DIM));
+                        cell(ui, 200.0, egui::RichText::new(&e.track).color(theme::dim()));
                         let truncated = e.name != e.track;
                         cell(
                             ui,
                             160.0,
-                            egui::RichText::new(&e.name).color(if truncated { AMBER } else { TEXT }),
+                            egui::RichText::new(&e.name).color(if truncated { theme::warn() } else { theme::text() }),
                         );
                         ui.end_row();
                     }
@@ -1575,7 +1584,7 @@ impl App {
             if ui.button("Clear").clicked() {
                 self.log.clear();
             }
-            ui.label(egui::RichText::new("newest at the bottom").small().color(DIM));
+            ui.label(egui::RichText::new("newest at the bottom").small().color(theme::dim()));
         });
         ui.add_space(6.0);
         let lines = self.log.lines();
@@ -1586,11 +1595,11 @@ impl App {
                 .show(ui, |ui| {
                     for line in lines {
                         let color = if line.contains("ERROR") {
-                            RED
+                            theme::bad()
                         } else if line.contains("WARN") {
-                            AMBER
+                            theme::warn()
                         } else {
-                            DIM
+                            theme::dim()
                         };
                         ui.label(egui::RichText::new(line).monospace().size(11.5).color(color));
                     }
@@ -1604,13 +1613,13 @@ impl App {
 
 fn bar_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(theme::PANEL)
+        .fill(theme::panel())
         .inner_margin(egui::Margin::symmetric(14, 8))
 }
 
 fn tabs_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(theme::BG)
+        .fill(theme::bg())
         .inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 4 })
 }
 
@@ -1628,19 +1637,19 @@ fn cell(ui: &mut egui::Ui, width: f32, text: egui::RichText) {
 /// A small rounded label for a piece of live state.
 fn chip(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
-        .fill(theme::CARD)
+        .fill(theme::surface())
         .corner_radius(egui::CornerRadius::same(9))
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).small().color(ACCENT));
+            ui.label(egui::RichText::new(text).small().color(theme::accent()));
         });
 }
 
 fn link_color(last: Option<std::time::Instant>) -> egui::Color32 {
     match last {
-        Some(t) if t.elapsed() < Duration::from_secs(10) => GREEN,
-        Some(_) => AMBER,
-        None => RED,
+        Some(t) if t.elapsed() < Duration::from_secs(10) => theme::good(),
+        Some(_) => theme::warn(),
+        None => theme::bad(),
     }
 }
 
@@ -1749,7 +1758,7 @@ impl App {
                      from it, so the console and the DAW cannot disagree.",
                 )
                 .small()
-                .color(DIM),
+                .color(theme::dim()),
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1757,7 +1766,7 @@ impl App {
                 for desk in patchbuild::Desk::ALL {
                     let picked = self.sheet_form.desk == desk;
                     let label = egui::RichText::new(desk.label())
-                        .color(if picked { TEXT } else { DIM });
+                        .color(if picked { theme::text() } else { theme::dim() });
                     if ui.selectable_label(picked, label).clicked() {
                         self.sheet_form.desk = desk;
                     }
@@ -1772,7 +1781,7 @@ impl App {
                              session only. Set the desk up from the same sheet by hand.",
                         )
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                     );
                 });
             }
@@ -1799,7 +1808,7 @@ impl App {
             match &self.sheet_form.read {
                 None => theme::empty(ui, "No sheet read yet. Pick one, or write a starter sheet to fill in."),
                 Some(Err(e)) => {
-                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(theme::bad()));
                 }
                 Some(Ok(sheet)) => {
                     let tracks = sheet.rows.iter().filter(|r| r.track.is_some()).count();
@@ -1808,7 +1817,7 @@ impl App {
                             "{} channels, {tracks} of them recorded",
                             sheet.rows.len()
                         ))
-                        .color(GREEN),
+                        .color(theme::good()),
                     );
                     if !sheet.unknown_columns.is_empty() {
                         ui.label(
@@ -1817,11 +1826,11 @@ impl App {
                                 sheet.unknown_columns.join(", ")
                             ))
                             .small()
-                            .color(DIM),
+                            .color(theme::dim()),
                         );
                     }
                     for w in &sheet.warnings {
-                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(AMBER));
+                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(theme::warn()));
                     }
                 }
             }
@@ -1839,7 +1848,7 @@ impl App {
                         self.sheet_form.desk.label()
                     ))
                     .small()
-                    .color(DIM),
+                    .color(theme::dim()),
                 );
                 return;
             }
@@ -1866,7 +1875,7 @@ impl App {
                         "the sheet is laid over this file, so its effects and busses survive"
                     })
                     .small()
-                    .color(DIM),
+                    .color(theme::dim()),
                 );
             });
             ui.horizontal(|ui| {
@@ -1875,7 +1884,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("the port group the DAW records - the Track column is an output of it")
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             });
             ui.horizontal(|ui| {
@@ -1982,7 +1991,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("read a sheet and give the show a name")
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             }
         });
@@ -1993,15 +2002,15 @@ impl App {
                 Ok(lines) => {
                     for line in lines {
                         let colour = match line.split_once(": ") {
-                            Some(("warning", _)) => AMBER,
-                            _ if line.starts_with("  ") => DIM,
-                            _ => TEXT,
+                            Some(("warning", _)) => theme::warn(),
+                            _ if line.starts_with("  ") => theme::dim(),
+                            _ => theme::text(),
                         };
                         ui.label(egui::RichText::new(line).small().color(colour));
                     }
                 }
                 Err(e) => {
-                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(theme::bad()));
                 }
             });
         }

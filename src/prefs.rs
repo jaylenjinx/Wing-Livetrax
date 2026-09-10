@@ -12,7 +12,7 @@ use crate::config::{
     SceneDirection, SceneMarker,
 };
 use crate::shared::{Command, ConsoleEvent};
-use crate::theme::{self, ACCENT, AMBER, DIM, TEXT};
+use crate::theme;
 use crate::timecode::Fps;
 
 /// Ardour's `/set_surface` strip-type bits.
@@ -33,6 +33,7 @@ const FEEDBACK_BITS: [(u32, &str); 15] = [
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Section {
+    Appearance,
     Console,
     LiveTrax,
     Names,
@@ -51,6 +52,7 @@ impl Section {
             .find(|(_, label)| label.eq_ignore_ascii_case(name))
             .map(|(section, _)| *section)
             .or_else(|| match name.to_lowercase().as_str() {
+                "appearance" | "theme" | "themes" => Some(Section::Appearance),
                 "console" | "wing" => Some(Section::Console),
                 "livetrax" | "daw" => Some(Section::LiveTrax),
                 "names" => Some(Section::Names),
@@ -64,7 +66,8 @@ impl Section {
             })
     }
 
-    const ALL: [(Section, &'static str); 9] = [
+    const ALL: [(Section, &'static str); 10] = [
+        (Section::Appearance, "Appearance"),
         (Section::Console, "Console"),
         (Section::LiveTrax, "LiveTrax"),
         (Section::Names, "Names"),
@@ -137,10 +140,10 @@ impl Prefs {
             .min_width(620.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::PANEL)
+                    .fill(theme::panel())
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::same(14))
-                    .stroke(egui::Stroke::new(1.0, theme::LINE)),
+                    .stroke(egui::Stroke::new(1.0, theme::line())),
             )
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
@@ -157,6 +160,7 @@ impl Prefs {
                             .show(ui, |ui| {
                                 ui.set_min_width(520.0);
                                 match self.section {
+                                    Section::Appearance => self.appearance(ui),
                                     Section::Console => self.console(ui),
                                     Section::LiveTrax => self.livetrax(ui),
                                     Section::Names => self.names(ui),
@@ -182,7 +186,7 @@ impl Prefs {
             ui.set_width(150.0);
             for (section, label) in Section::ALL {
                 let selected = self.section == section;
-                let text = egui::RichText::new(label).color(if selected { TEXT } else { DIM });
+                let text = egui::RichText::new(label).color(if selected { theme::text() } else { theme::dim() });
                 if ui.selectable_label(selected, text).clicked() {
                     self.section = section;
                 }
@@ -205,18 +209,38 @@ impl Prefs {
                 self.open = false;
             }
             if let Some(status) = &self.status {
-                ui.label(egui::RichText::new(status).small().color(ACCENT));
+                ui.label(egui::RichText::new(status).small().color(theme::accent()));
             } else {
                 ui.label(
                     egui::RichText::new("Hosts and ports take effect on restart.")
                         .small()
-                        .color(DIM),
+                        .color(theme::dim()),
                 );
             }
         });
     }
 
     // ------------------------------------------------------------ sections --
+
+    fn appearance(&mut self, ui: &mut egui::Ui) {
+        heading(ui, "Appearance", "A bright room and a dark stage want different things.");
+        let current = self.draft.appearance.theme;
+        for theme in crate::theme::Theme::ALL {
+            let picked = current == theme;
+            ui.horizontal(|ui| {
+                theme::field(ui, "");
+                if ui.selectable_label(picked, theme.label()).clicked() && !picked {
+                    self.draft.appearance.theme = theme;
+                    // Show it straight away: a theme you cannot see is hard to
+                    // choose between.
+                    crate::theme::apply(ui.ctx(), theme);
+                }
+                ui.label(egui::RichText::new(theme.blurb()).small().color(theme::dim()));
+            });
+        }
+        ui.add_space(6.0);
+        hint(ui, "The change is live. Save to file to have it come back next time.");
+    }
 
     fn console(&mut self, ui: &mut egui::Ui) {
         let wing = &mut self.draft.wing;
@@ -296,7 +320,7 @@ impl Prefs {
         check_row(ui, "Ask the console at startup", &mut patch.query_on_start);
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("ADDRESSES FOR THE LIVE QUERY").small().strong().color(DIM));
+        ui.label(egui::RichText::new("ADDRESSES FOR THE LIVE QUERY").small().strong().color(theme::dim()));
         hint(ui, "Derived from the .snap tree. Change these only if `probe` shows your firmware differs.");
         let live = &mut patch.live;
         text_row(ui, "Output source group", &mut live.out_source_group);
@@ -308,10 +332,10 @@ impl Prefs {
         num_row(ui, "Collect replies for (ms)", &mut live.settle_ms, 200..=10_000);
 
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("OUTPUTS PER GROUP").small().strong().color(DIM));
+        ui.label(egui::RichText::new("OUTPUTS PER GROUP").small().strong().color(theme::dim()));
         egui::Grid::new("group_sizes").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
             for (i, (group, size)) in live.group_sizes.iter_mut().enumerate() {
-                ui.label(egui::RichText::new(group).monospace().color(TEXT));
+                ui.label(egui::RichText::new(group).monospace().color(theme::text()));
                 ui.add(egui::DragValue::new(size).range(1..=128));
                 if i % 2 == 1 {
                     ui.end_row();
@@ -343,7 +367,7 @@ impl Prefs {
         check_row(ui, "Transport control", &mut self.draft.transport.enabled);
 
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("BUTTONS").small().strong().color(DIM));
+        ui.label(egui::RichText::new("BUTTONS").small().strong().color(theme::dim()));
         hint(ui, "Press learn, then the button on the console - or pick one out of what it is sending, below.");
         let mut remove = None;
         let mut learn = None;
@@ -357,7 +381,7 @@ impl Prefs {
                         .font(egui::TextStyle::Monospace),
                 );
                 let label = if waiting { "press it now" } else { "learn" };
-                let text = egui::RichText::new(label).color(if waiting { ACCENT } else { DIM });
+                let text = egui::RichText::new(label).color(if waiting { theme::accent() } else { theme::dim() });
                 if ui.add(egui::Button::new(text).small()).clicked() {
                     learn = Some(if waiting { None } else { Some(i) });
                 }
@@ -385,7 +409,7 @@ impl Prefs {
         }
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("WHAT THE CONSOLE IS SENDING").small().strong().color(DIM));
+        ui.label(egui::RichText::new("WHAT THE CONSOLE IS SENDING").small().strong().color(theme::dim()));
         if console.is_empty() {
             hint(ui, "Nothing yet. Touch a control on the console and it appears here.");
         } else {
@@ -401,13 +425,13 @@ impl Prefs {
                                 egui::RichText::new(&event.address)
                                     .monospace()
                                     .size(12.0)
-                                    .color(TEXT),
+                                    .color(theme::text()),
                             );
                             ui.label(
                                 egui::RichText::new(format!("{:.2}", event.value))
                                     .monospace()
                                     .small()
-                                    .color(DIM),
+                                    .color(theme::dim()),
                             );
                             if ui.small_button("use").clicked() {
                                 pick = Some(event.address.clone());
@@ -431,7 +455,7 @@ impl Prefs {
         }
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("LIGHTS").small().strong().color(DIM));
+        ui.label(egui::RichText::new("LIGHTS").small().strong().color(theme::dim()));
         let mut remove = None;
         for (i, led) in self.draft.transport.leds.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -476,7 +500,7 @@ impl Prefs {
         }
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("RECORD ARM").small().strong().color(DIM));
+        ui.label(egui::RichText::new("RECORD ARM").small().strong().color(theme::dim()));
         let mut remove = None;
         for (i, arm) in self.draft.transport.rec_arm.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -485,9 +509,9 @@ impl Prefs {
                         .desired_width(210.0)
                         .font(egui::TextStyle::Monospace),
                 );
-                ui.label(egui::RichText::new("channel").small().color(DIM));
+                ui.label(egui::RichText::new("channel").small().color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut arm.channel).range(0..=96));
-                ui.label(egui::RichText::new("strip").small().color(DIM));
+                ui.label(egui::RichText::new("strip").small().color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut arm.strip).range(0..=512));
                 ui.checkbox(&mut arm.follow_value, "latch");
                 if ui.small_button("remove").clicked() {
@@ -527,7 +551,7 @@ impl Prefs {
         num_row(ui, "Ignore repeats within (ms)", &mut scenes.retrigger_guard_ms, 0..=30_000);
 
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("SCENE TO MARKER").small().strong().color(DIM));
+        ui.label(egui::RichText::new("SCENE TO MARKER").small().strong().color(theme::dim()));
         let mut remove = None;
         for (i, entry) in scenes.map.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -573,7 +597,7 @@ impl Prefs {
                 tc.offset = if offset.trim().is_empty() { None } else { Some(offset.clone()) };
             }
             if !offset.trim().is_empty() && crate::timecode::Timecode::parse(&offset).is_none() {
-                ui.label(egui::RichText::new("hours:minutes:seconds:frames").small().color(AMBER));
+                ui.label(egui::RichText::new("hours:minutes:seconds:frames").small().color(theme::warn()));
             }
         });
         text_row(ui, "Marker name", &mut tc.marker_template);
@@ -591,7 +615,7 @@ impl Prefs {
                      sample position instead.",
                 )
                 .small()
-                .color(AMBER),
+                .color(theme::warn()),
             );
         }
     }
@@ -613,13 +637,13 @@ impl Prefs {
         check_row(ui, "Channel N to strip N", &mut map.one_to_one);
         num_row_i32(ui, "Strip offset", &mut map.strip_offset, -128..=128);
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("OVERRIDES").small().strong().color(DIM));
+        ui.label(egui::RichText::new("OVERRIDES").small().strong().color(theme::dim()));
         let mut remove = None;
         for (i, pair) in map.pairs.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("channel").small().color(DIM));
+                ui.label(egui::RichText::new("channel").small().color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut pair.channel).range(1..=96));
-                ui.label(egui::RichText::new("strip").small().color(DIM));
+                ui.label(egui::RichText::new("strip").small().color(theme::dim()));
                 ui.add(egui::DragValue::new(&mut pair.strip).range(1..=512));
                 if ui.small_button("remove").clicked() {
                     remove = Some(i);
@@ -639,14 +663,14 @@ impl Prefs {
 
 fn heading(ui: &mut egui::Ui, title: &str, blurb: &str) {
     ui.heading(title);
-    ui.label(egui::RichText::new(blurb).small().color(DIM));
+    ui.label(egui::RichText::new(blurb).small().color(theme::dim()));
     ui.add_space(8.0);
 }
 
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.horizontal(|ui| {
         theme::field(ui, "");
-        ui.label(egui::RichText::new(text).small().color(DIM));
+        ui.label(egui::RichText::new(text).small().color(theme::dim()));
     });
 }
 
@@ -711,7 +735,7 @@ fn path_row(ui: &mut egui::Ui, label: &str, value: &mut Option<std::path::PathBu
 /// A list of free-text values with add and remove.
 fn string_list(ui: &mut egui::Ui, label: &str, values: &mut Vec<String>, example: &str) {
     ui.add_space(6.0);
-    ui.label(egui::RichText::new(label.to_uppercase()).small().strong().color(DIM));
+    ui.label(egui::RichText::new(label.to_uppercase()).small().strong().color(theme::dim()));
     let mut remove = None;
     for (i, value) in values.iter_mut().enumerate() {
         ui.horizontal(|ui| {
@@ -735,7 +759,7 @@ fn string_list(ui: &mut egui::Ui, label: &str, values: &mut Vec<String>, example
 
 /// Bit flags as named checkboxes, three to a row.
 fn bitmask(ui: &mut egui::Ui, label: &str, value: &mut u32, bits: &[(u32, &str)]) {
-    ui.label(egui::RichText::new(label.to_uppercase()).small().strong().color(DIM));
+    ui.label(egui::RichText::new(label.to_uppercase()).small().strong().color(theme::dim()));
     egui::Grid::new(label).num_columns(3).spacing([14.0, 3.0]).show(ui, |ui| {
         for (i, (bit, name)) in bits.iter().enumerate() {
             let mut on = *value & bit != 0;
@@ -844,7 +868,7 @@ fn action_editor(ui: &mut egui::Ui, index: usize, action: &mut Action) {
             ui.add(egui::DragValue::new(speed).speed(0.1).range(-8.0..=8.0).suffix("x"));
         }
         Action::Osc { address, .. } => {
-            ui.label(egui::RichText::new(format!("{address} (edit in the file)")).small().color(DIM));
+            ui.label(egui::RichText::new(format!("{address} (edit in the file)")).small().color(theme::dim()));
         }
         _ => {}
     }

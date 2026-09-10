@@ -28,6 +28,8 @@ pub struct Config {
     pub patch: Patch,
     #[serde(default)]
     pub timecode: Timecode,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 impl Config {
@@ -490,6 +492,15 @@ impl ChannelMap {
         self.to_strip.iter().map(|(c, s)| (*c, *s)).collect()
     }
     pub fn len(&self) -> usize { self.to_strip.len() }
+}
+
+// ------------------------------------------------------------ appearance ---
+
+/// How the window looks.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Appearance {
+    #[serde(default)]
+    pub theme: crate::theme::Theme,
 }
 
 // -------------------------------------------------------------- timecode ---
