@@ -16,7 +16,8 @@ OSC:
 * **Offline WING snapshot** — the reverse: write a LiveTrax session's track
   names into a real `.snap`, with no console or DAW running.
 * **Build a show from a patch sheet** — for a WING, or a session-only build for
-  an Allen & Heath Qu-16/24/32. A spreadsheet of the input list becomes
+  an Allen & Heath Qu-16/24/32, which can also take its names from a Qu scene
+  file. A spreadsheet of the input list becomes
   both a loadable console snapshot and a matching LiveTrax session.
 * **Recorded-output selector** — names follow the console's own output patch,
   so track 14 gets the name of whatever the desk actually sends on output 14.
@@ -364,6 +365,30 @@ warning: an Allen & Heath Qu-16 has no console file to write, so these columns
          were read but not applied: Source, Gain, 48V, DCA
 ```
 
+#### From a scene file instead of a sheet
+
+If the patch already exists on the desk, a scene saved to USB carries the names
+too. Point at the `.DAT` and skip the spreadsheet:
+
+```bash
+wing-livetrax-bridge qu-scene /Volumes/QU/Scenes/SCENE012.DAT     # what is in it
+wing-livetrax-bridge new-session --from-scene /Volumes/QU/Scenes/SCENE012.DAT \
+  --channels 1-16 --include-extras --dest ~/Music/Livetrax --name "Soundcheck"
+```
+
+A scene holds 32 mono inputs, 3 stereo inputs and 4 FX returns. The mono inputs
+become the tracks; `--include-extras` adds the stereo inputs and returns after
+them, and unnamed slots follow `--include-unnamed` exactly as the channels do.
+
+The scene format is not published by Allen & Heath. The layout used here — the
+name at `0x9C` in each `0xC0`-byte channel, from `0x30` — follows the community
+decoding in [crossan007/AHQUToolkit](https://github.com/crossan007/AHQUToolkit).
+So the reader checks rather than trusts: a file too short, or one whose channel
+names do not read as text, is refused with what it expected instead of a session
+full of rubbish. **It has not been run against a scene from a real desk** — only
+against files built to that layout. Try `qu-scene` on one of yours before you
+rely on it, and send me what it prints if it looks wrong.
+
 `--desk` takes `wing` (the default), `qu-16`, `qu-24` and `qu-32`, and the same
 choice sits at the top of the Patch sheet tab. Channels past the desk's input
 count are called out — channel 20 on a Qu-16 is a typo worth knowing about
@@ -505,6 +530,8 @@ Hosts and ports need a restart, and the window says so.
 | `patch-template [-o F]` | write a starter patch sheet |
 | `build --sheet F --dest D --name N` | a snapshot and a session from a patch sheet |
 | `build --sheet F --desk qu-16 --dest D --name N` | a session from a patch sheet, for a Qu |
+| `qu-scene F` | what is in an Allen & Heath Qu scene (.DAT) |
+| `new-session --from-scene F` | a session named from a Qu scene |
 | `snap-info F [--output USB]` | list a .snap's channel names and output patches |
 | `patch [--output USB] [--groups]` | read the output patch from the live console |
 | `probe [--target wing\|daw\|both] [--filter /ch]` | print every OSC message received |

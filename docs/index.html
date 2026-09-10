@@ -532,6 +532,16 @@ wing-livetrax-bridge build --sheet patch-sheet.csv \
       <div class="code"><pre><code>patch-sheet.csv: 16 channels, 16 tracks for an Allen &amp; Heath Qu-16
 <span class="c">warning: an Allen &amp; Heath Qu-16 has no console file to write, so these
          columns were read but not applied: Source, Gain, 48V, DCA</span></code></pre></div>
+      <h3>From a scene file instead of a sheet</h3>
+      <p>If the patch already exists on the desk, a scene saved to USB carries the names too. Point at the <code>.DAT</code> and skip the spreadsheet:</p>
+      <div class="code"><pre><code>wing-livetrax-bridge qu-scene /Volumes/QU/Scenes/SCENE012.DAT     <span class="c"># what is in it</span>
+wing-livetrax-bridge new-session --from-scene /Volumes/QU/Scenes/SCENE012.DAT \
+  --channels 1-16 --include-extras --dest ~/Music/Livetrax --name "Soundcheck"</code></pre></div>
+      <p>A scene holds 32 mono inputs, 3 stereo inputs and 4 FX returns. The mono inputs become the tracks; <code>--include-extras</code> adds the stereo inputs and returns after them, and unnamed slots follow <code>--include-unnamed</code> exactly as the channels do.</p>
+      <div class="note warn">
+        <p>The scene format is not published by Allen &amp; Heath. The layout used here &mdash; the name at <code>0x9C</code> in each <code>0xC0</code>-byte channel, from <code>0x30</code> &mdash; follows the community decoding in <a href="https://github.com/crossan007/AHQUToolkit">crossan007/AHQUToolkit</a>. The reader checks rather than trusts: a file too short, or one whose channel names do not read as text, is refused with what it expected instead of producing a session full of rubbish. <strong>It has not been run against a scene from a real desk</strong> &mdash; only against files built to that layout. Try <code>qu-scene</code> on one of yours before relying on it.</p>
+      </div>
+
       <p><code>--desk</code> takes <code>wing</code> (the default), <code>qu-16</code>, <code>qu-24</code> and <code>qu-32</code>, and the same choice sits at the top of the Patch sheet tab. Channels past the desk's input count are called out &mdash; channel 20 on a Qu-16 is a typo worth knowing about before the session is built. A sheet with no <code>Track</code> column at all still describes a session: on a desk that records its inputs in order, track N is channel N, and the build says that is what it assumed.</p>
 
       <h3>How the two halves line up</h3>
@@ -549,6 +559,7 @@ wing-livetrax-bridge build --sheet patch-sheet.csv \
             <tr><td><code>run</code></td><td>Run headless, logging to the terminal. <code>-v</code> traces every message.</td></tr>
             <tr><td><code>patch</code></td><td>Read the output patch from the live console. <code>--groups</code> lists what it answers for.</td></tr>
             <tr><td><code>snap-info F</code></td><td>Channel names and output patches inside a <code>.snap</code>.</td></tr>
+            <tr><td><code>qu-scene F</code></td><td>What is in an Allen &amp; Heath Qu scene (<code>.DAT</code>).</td></tr>
             <tr><td><code>new-session</code></td><td>Build a LiveTrax session named from the console or from a snapshot.</td></tr>
             <tr><td><code>wing-snapshot</code></td><td>Console channel names from a session; write a file and/or apply them.</td></tr>
             <tr><td><code>patch-template</code></td><td>Write a starter patch sheet, with the column reference and an example.</td></tr>

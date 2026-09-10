@@ -239,6 +239,53 @@ def main():
           unknown.returncode != 0 and "qu-16" in (unknown.stdout + unknown.stderr),
           unknown.stdout + unknown.stderr)
 
+    # ---- a session from a Qu scene file ----------------------------------
+    # A scene laid out the way the .DAT format describes: the names sit at
+    # 0x9C in each 0xC0-byte channel, starting at 0x30.
+    scene = bytearray(0x6520)
+    scene[3] = 12
+    scene[0x0C:0x0C + 8] = b"SOUNDCHK"
+    for index, chan_name in {0: "Kick", 1: "Snare", 15: "Talkbck",
+                             32: "Playbck", 35: "Verb"}.items():
+        at = 0x30 + index * 0xC0
+        scene[at + 0x9C:at + 0x9C + len(chan_name)] = chan_name.encode()
+        scene[at + 0xB7] = index + 1
+    scene_path = os.path.join(tmp, "SCENE012.DAT")
+    open(scene_path, "wb").write(bytes(scene))
+
+    info = subprocess.run([binary, "-c", cfg, "qu-scene", scene_path],
+                          capture_output=True, text=True)
+    check("qu-scene reads the file",
+          info.returncode == 0 and "SOUNDCHK" in info.stdout, info.stdout + info.stderr)
+    check("it names the slots, not just the channels",
+          "ST1" in info.stdout and "FX1 return" in info.stdout, info.stdout)
+
+    built = subprocess.run([binary, "-c", cfg, "new-session", "--from-scene", scene_path,
+                            "--channels", "1-16", "--include-extras", "--include-unnamed",
+                            "--dest", dest, "--name", "From Scene", "--template", tpl],
+                           capture_output=True, text=True)
+    check("a session is built from the scene", built.returncode == 0,
+          built.stdout + built.stderr)
+    scene_session = os.path.join(dest, "From Scene", "From Scene.ardour")
+    if os.path.isfile(scene_session):
+        names = [r.get("name") for r in ET.parse(scene_session).getroot()
+                 .find("Routes").findall("Route") if r.get("name") != "Master"]
+        check("named inputs come through", names[0] == "Kick" and names[15] == "Talkbck", str(names[:3]))
+        check("unnamed inputs hold their place", names[2] == "Ch 3", str(names[:4]))
+        check("the extras follow the inputs", "Playbck" in names and "Verb" in names, str(names[16:]))
+    else:
+        for name in ["named inputs come through", "unnamed inputs hold their place",
+                     "the extras follow the inputs"]:
+            check(name, False, "no session was written")
+
+    junk = os.path.join(tmp, "not-a-scene.DAT")
+    open(junk, "wb").write(bytes([0xAB]) * 0x6520)
+    refused = subprocess.run([binary, "-c", cfg, "qu-scene", junk],
+                             capture_output=True, text=True)
+    check("a file that is not a scene is refused",
+          refused.returncode != 0 and "does not read as a Qu scene" in (refused.stdout + refused.stderr),
+          refused.stdout + refused.stderr)
+
     passed = sum(1 for r in results if r)
     print(f"\n{passed}/{len(results)} checks passed")
     return 0 if passed == len(results) else 1

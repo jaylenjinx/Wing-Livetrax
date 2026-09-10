@@ -11,6 +11,7 @@ mod session;
 mod patch;
 mod sheet;
 mod prefs;
+mod quscene;
 mod shared;
 mod snapfile;
 mod snapshot;
@@ -80,6 +81,13 @@ enum Cmd {
         /// console. Defaults to patch.snap_file when one is configured.
         #[arg(long)]
         from_snap: Option<PathBuf>,
+        /// Take names from an Allen & Heath Qu scene (.DAT) saved to USB.
+        #[arg(long)]
+        from_scene: Option<PathBuf>,
+        /// With --from-scene, add the stereo inputs and FX returns after the
+        /// mono inputs.
+        #[arg(long)]
+        include_extras: bool,
         /// Output group to read from that snapshot. Defaults to
         /// patch.output_group.
         #[arg(long)]
@@ -168,6 +176,14 @@ enum Cmd {
         /// List every group the console answered for, not one group's names.
         #[arg(long)]
         groups: bool,
+    },
+    /// Inspect an Allen & Heath Qu scene (.DAT) saved to USB.
+    QuScene {
+        /// The scene file, e.g. Scene001.DAT.
+        file: PathBuf,
+        /// Show every slot in the file, not just the inputs that are named.
+        #[arg(long)]
+        all: bool,
     },
     /// Inspect a WING .snap file: channel names and output patches.
     SnapInfo {
@@ -296,6 +312,7 @@ fn main() -> Result<()> {
         Cmd::Init { output } => cmd_init(&output),
         Cmd::Markers => cmd_markers(&config_path),
         Cmd::SnapInfo { file, output } => cmd_snap_info(&file, output.as_deref()),
+        Cmd::QuScene { file, all } => cmd_qu_scene(&file, all),
         Cmd::Patch { output, seconds, groups } => {
             block_on(cmd_patch(&config_path, output, seconds, groups))
         }
@@ -336,6 +353,8 @@ fn main() -> Result<()> {
             name,
             channels,
             from_snap,
+            from_scene,
+            include_extras,
             output,
             no_patch,
             template,
@@ -351,6 +370,8 @@ fn main() -> Result<()> {
                 name,
                 channels,
                 from_snap,
+                from_scene,
+                include_extras,
                 output,
                 no_patch,
                 template,
@@ -543,6 +564,8 @@ struct NewSessionArgs {
     name: String,
     channels: String,
     from_snap: Option<PathBuf>,
+    from_scene: Option<PathBuf>,
+    include_extras: bool,
     output: Option<String>,
     no_patch: bool,
     template: Option<PathBuf>,
@@ -557,15 +580,41 @@ async fn cmd_new_session(path: &std::path::Path, args: NewSessionArgs) -> Result
     let cfg = Config::load(path)?;
     let (first, last) = parse_range(&args.channels)?;
 
-    // Names come either from a saved output patch (offline) or from the
-    // console itself.
-    let snap_path = if args.no_patch {
+    // Names come from a Qu scene, a saved WING output patch, or the console
+    // itself - in that order, most specific first.
+    let snap_path = if args.no_patch || args.from_scene.is_some() {
         None
     } else {
         args.from_snap.clone().or_else(|| cfg.patch.snap_file.clone())
     };
     let mut names: std::collections::BTreeMap<u16, String> = Default::default();
+    let mut extras: Vec<String> = Vec::new();
     let via_patch = snap_path.is_some();
+
+    if let Some(path) = &args.from_scene {
+        let scene = quscene::read(path)?;
+        for w in &scene.warnings {
+            println!("warning: {w}");
+        }
+        for channel in &scene.channels {
+            if let quscene::Slot::Input(n) = channel.slot {
+                if !channel.name.is_empty() {
+                    names.insert(n, channel.name.clone());
+                }
+            }
+        }
+        if args.include_extras {
+            // An unnamed FX return is only worth a track if the empties were
+            // asked for, the same rule the inputs follow.
+            extras = scene
+                .extras()
+                .into_iter()
+                .filter(|(_, name)| args.include_unnamed || !name.is_empty())
+                .map(|(label, name)| if name.is_empty() { label } else { name })
+                .collect();
+        }
+        println!("{}: {}", path.display(), scene.summary());
+    }
 
     match &snap_path {
         Some(path) => {
@@ -593,6 +642,7 @@ async fn cmd_new_session(path: &std::path::Path, args: NewSessionArgs) -> Result
                 snapfile::group_label(&group)
             );
         }
+        None if args.from_scene.is_some() => {}
         None => {
             let (wing, mut rx) = open_wing(&cfg).await?;
             wing.subscribe().await.ok();
@@ -630,6 +680,7 @@ async fn cmd_new_session(path: &std::path::Path, args: NewSessionArgs) -> Result
             raw.push(name);
         }
     }
+    raw.extend(extras);
     let tracks = session::normalise_track_names(raw);
     anyhow::ensure!(
         !tracks.is_empty(),
@@ -874,6 +925,48 @@ async fn cmd_patch(
         let ch = slot.channel.map(|c| c.to_string()).unwrap_or_default();
         println!("{:>4}  {:<10} {:<6} {}", slot.output, slot.source, ch, slot.name);
     }
+    Ok(())
+}
+
+fn cmd_qu_scene(file: &std::path::Path, all: bool) -> Result<()> {
+    let scene = quscene::read(file)?;
+    println!("{}", file.display());
+    println!("  {}", scene.summary());
+    for w in &scene.warnings {
+        println!("  warning: {w}");
+    }
+    if all {
+        println!("\n{:<6} {:<12} {:<10} name", "slot#", "slot", "stored as");
+    } else {
+        println!("\n{:<12} {:<10} name", "slot", "stored as");
+    }
+    for channel in &scene.channels {
+        let hidden = matches!(channel.slot, quscene::Slot::Other) || channel.name.is_empty();
+        if hidden && !all {
+            continue;
+        }
+        if all {
+            println!(
+                "{:<6} {:<12} {:<10} {}",
+                channel.index,
+                channel.slot.label(),
+                format!("#{}", channel.id),
+                channel.name
+            );
+        } else {
+            println!(
+                "{:<12} {:<10} {}",
+                channel.slot.label(),
+                format!("#{}", channel.id),
+                channel.name
+            );
+        }
+    }
+    println!(
+        "\nBuild a session from it with:\n  \
+         wing-livetrax-bridge new-session --from-scene {} --dest ~/Music/Livetrax --name \"My Show\"",
+        file.display()
+    );
     Ok(())
 }
 
