@@ -11,6 +11,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use xmltree::{Element, EmitterConfig, XMLNode};
 
+/// How one track should look and behave, beside its name. Empty means "as the
+/// template had it", which is what the console-driven paths want; the patch
+/// sheet fills it in so a track carries the channel's own colour.
+#[derive(Debug, Clone, Default)]
+pub struct TrackStyle {
+    /// Ardour's packed RGBA track colour.
+    pub colour: Option<u32>,
+    pub rec_arm: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRequest {
     /// Folder that will contain the new session folder.
@@ -27,6 +37,9 @@ pub struct SessionRequest {
     pub connect_inputs: bool,
     /// Allow the synthesised fallback when no template can be found.
     pub allow_minimal: bool,
+    /// Per-track colour and record arming, indexed alongside `tracks`. An
+    /// empty vector leaves every track as the template drew it.
+    pub styles: Vec<TrackStyle>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +241,7 @@ fn build_from_template(
             i,
             &mut next_id,
             req.connect_inputs,
+            req.styles.get(i),
         )));
     }
     routes.children = kept;
@@ -305,6 +319,7 @@ fn clone_route(
     order: usize,
     next_id: &mut u64,
     connect_inputs: bool,
+    style: Option<&TrackStyle>,
 ) -> Element {
     let mut route = proto.clone();
     let old_name = route.attributes.get("name").cloned().unwrap_or_default();
@@ -316,6 +331,15 @@ fn clone_route(
     }
     if let Some(pi) = route.get_mut_child("PresentationInfo") {
         pi.attributes.insert("order".into(), order.to_string());
+        if let Some(colour) = style.and_then(|s| s.colour) {
+            pi.attributes.insert("color".into(), colour.to_string());
+        }
+    }
+    // Stated either way when the caller has an opinion: the template's own
+    // track may well have been left armed, and a track with nothing patched to
+    // it should not inherit that.
+    if let Some(style) = style {
+        set_controllable(&mut route, "rec-enable", if style.rec_arm { "1" } else { "0" });
     }
 
     rename_in_tree(&mut route, &old_name, new_name);
@@ -358,7 +382,15 @@ fn reassign_ids(el: &mut Element, next_id: &mut u64) {
 }
 
 /// Point the track's inputs at `system:capture_<n>`, replacing whatever the
-/// template was connected to (ports carry several <Connection> children).
+/// template was connected to.
+///
+/// Which element carries a connection depends on the version: older sessions
+/// list `<Connection other="..."/>`, while LiveTrax 3 records one
+/// `<ExtConnection for="<backend>;;<device>" other="..."/>` per audio backend,
+/// plus a bare one that names a backend the track has no connection on. A
+/// template written by LiveTrax 3 therefore keeps its own inputs unless the
+/// `ExtConnection`s are the ones rewritten, which is why both are handled -
+/// and why the backends found on the template are reused rather than invented.
 fn connect_capture(route: &mut Element, n: usize) {
     for node in route.children.iter_mut() {
         let Some(io) = node.as_mut_element() else { continue };
@@ -372,12 +404,48 @@ fn connect_capture(route: &mut Element, n: usize) {
                 continue;
             }
             port_index += 1;
-            let mut conn = Element::new("Connection");
-            conn.attributes
-                .insert("other".into(), format!("system:capture_{}", n + port_index - 1));
-            port.children
-                .retain(|c| c.as_element().map(|e| e.name != "Connection").unwrap_or(true));
-            port.children.push(XMLNode::Element(conn));
+            let other = format!("system:capture_{}", n + port_index - 1);
+
+            let backends: Vec<String> = port
+                .children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .filter(|e| e.name == "ExtConnection")
+                .filter_map(|e| e.attributes.get("for").cloned())
+                .collect();
+            port.children.retain(|c| {
+                c.as_element()
+                    .map(|e| e.name != "Connection" && e.name != "ExtConnection")
+                    .unwrap_or(true)
+            });
+
+            if backends.is_empty() {
+                let mut conn = Element::new("Connection");
+                conn.attributes.insert("other".into(), other);
+                port.children.push(XMLNode::Element(conn));
+                continue;
+            }
+            let mut seen: Vec<String> = Vec::new();
+            for backend in backends {
+                if seen.contains(&backend) {
+                    continue;
+                }
+                let mut conn = Element::new("ExtConnection");
+                conn.attributes.insert("for".into(), backend.clone());
+                conn.attributes.insert("other".into(), other.clone());
+                port.children.push(XMLNode::Element(conn));
+                seen.push(backend);
+            }
+        }
+    }
+}
+
+/// Set one of a route's `<Controllable>` values, e.g. arming it for record.
+fn set_controllable(route: &mut Element, name: &str, value: &str) {
+    for node in route.children.iter_mut() {
+        let Some(el) = node.as_mut_element() else { continue };
+        if el.name == "Controllable" && el.attributes.get("name").map(String::as_str) == Some(name) {
+            el.attributes.insert("value".into(), value.to_string());
         }
     }
 }
@@ -557,4 +625,154 @@ pub fn discover_templates() -> Vec<PathBuf> {
     }
     found.sort();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A template shaped like the one LiveTrax 3 writes: connections live in
+    /// `ExtConnection`, one per audio backend, and the track is left armed.
+    const TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Session version="7003" name="Empty" sample-rate="48000" id-counter="90">
+  <Routes>
+    <Route id="10" name="Master" default-type="audio">
+      <PresentationInfo order="0" flags="MasterOut,OrderSet" color="1"/>
+    </Route>
+    <Route id="20" name="Audio 1" default-type="audio" audio-playlist="30">
+      <PresentationInfo order="1" flags="AudioTrack,OrderSet" color="99"/>
+      <Controllable name="rec-enable" id="21" flags="Toggle" value="1"/>
+      <IO name="Audio 1" id="22" direction="Input" default-type="audio">
+        <Port name="Audio 1/audio_in 1" type="audio" direction="Input">
+          <ExtConnection for="CoreAudio;;Interface"/>
+          <ExtConnection for="CoreAudio;;Interface" other="system:capture_7"/>
+        </Port>
+      </IO>
+      <IO name="Audio 1" id="23" direction="Output" default-type="audio"/>
+    </Route>
+  </Routes>
+  <Playlists><Playlist id="30" name="Audio 1.1"/></Playlists>
+  <Regions/><Sources/><Locations/>
+</Session>"#;
+
+    fn build(tracks: Vec<&str>, styles: Vec<TrackStyle>) -> Element {
+        let dir = std::env::temp_dir().join(format!(
+            "wing-session-{}-{}",
+            std::process::id(),
+            tracks.len() * 100 + styles.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let template = dir.join("Empty.ardour");
+        std::fs::write(&template, TEMPLATE).unwrap();
+        let req = SessionRequest {
+            parent_dir: dir.clone(),
+            name: "Show".into(),
+            sample_rate: 48_000,
+            tracks: tracks.into_iter().map(str::to_string).collect(),
+            template: Some(template),
+            connect_inputs: true,
+            allow_minimal: false,
+            styles,
+        };
+        let mut warnings = Vec::new();
+        let root = build_from_template(&req.template.clone().unwrap(), &req, &mut warnings).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        root
+    }
+
+    fn track<'a>(root: &'a Element, name: &str) -> &'a Element {
+        root.get_child("Routes")
+            .unwrap()
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .find(|e| e.attributes.get("name").map(String::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("no track named {name}"))
+    }
+
+    #[test]
+    fn inputs_are_rewired_where_this_version_keeps_them() {
+        // LiveTrax 3 records connections per audio backend. Rewriting only the
+        // older <Connection> elements would leave the template's own inputs in
+        // place, and every track would record the template's channel.
+        let root = build(vec!["Kick", "Snare"], Vec::new());
+        let port = track(&root, "Snare")
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .find(|e| e.name == "IO" && e.attributes.get("direction").unwrap() == "Input")
+            .unwrap()
+            .get_child("Port")
+            .unwrap();
+        let conns: Vec<(&str, Option<&String>)> = port
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .map(|e| (e.name.as_str(), e.attributes.get("other")))
+            .collect();
+        assert_eq!(conns.len(), 1, "the template's own connection should be gone");
+        assert_eq!(conns[0].0, "ExtConnection");
+        assert_eq!(conns[0].1.map(String::as_str), Some("system:capture_2"));
+        assert_eq!(
+            port.children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .next()
+                .unwrap()
+                .attributes
+                .get("for")
+                .map(String::as_str),
+            Some("CoreAudio;;Interface"),
+            "the backend is the template's, not one we made up"
+        );
+    }
+
+    #[test]
+    fn a_style_sets_the_colour_and_states_the_arming_either_way() {
+        let root = build(
+            vec!["Kick", "Spare"],
+            vec![
+                TrackStyle { colour: Some(3794415871), rec_arm: true },
+                TrackStyle { colour: None, rec_arm: false },
+            ],
+        );
+        let kick = track(&root, "Kick");
+        let pi = kick.get_child("PresentationInfo").unwrap();
+        assert_eq!(pi.attributes.get("color").map(String::as_str), Some("3794415871"));
+        assert_eq!(arming(kick), "1");
+        // The template's track was armed; a track with nothing patched to it
+        // must not inherit that.
+        let spare = track(&root, "Spare");
+        assert_eq!(arming(spare), "0");
+        assert_eq!(
+            spare.get_child("PresentationInfo").unwrap().attributes.get("color").map(String::as_str),
+            Some("99"),
+            "no colour asked for means the template's"
+        );
+    }
+
+    #[test]
+    fn without_styles_the_template_is_left_as_it_was() {
+        let root = build(vec!["Kick"], Vec::new());
+        assert_eq!(arming(track(&root, "Kick")), "1");
+    }
+
+    fn arming(route: &Element) -> &str {
+        route
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .find(|e| e.name == "Controllable" && e.attributes.get("name").unwrap() == "rec-enable")
+            .and_then(|e| e.attributes.get("value"))
+            .map(String::as_str)
+            .unwrap()
+    }
+
+    #[test]
+    fn names_are_made_port_safe_and_unique() {
+        assert_eq!(
+            normalise_track_names(vec!["Amb".into(), "Amb".into(), "Vox/Lead".into()]),
+            ["Amb", "Amb 2", "Vox-Lead"]
+        );
+    }
 }

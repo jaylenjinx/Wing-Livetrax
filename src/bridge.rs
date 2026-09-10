@@ -1493,6 +1493,7 @@ max_len_wing = 6
                 tracks: vec!["KICK".into(), "KICK".into()],
                 template: None,
                 connect_inputs: true,
+                styles: Vec::new(),
                 allow_minimal: true,
             })))
             .await

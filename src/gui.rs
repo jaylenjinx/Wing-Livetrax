@@ -10,6 +10,8 @@ use std::time::Duration;
 use crate::config::{Action, Config, PatchSource};
 use crate::session::{self, SessionRequest};
 use crate::patch::OutputGroup;
+use crate::patchbuild;
+use crate::sheet;
 use crate::prefs::Prefs;
 use crate::snapfile::SnapFile;
 use crate::snapshot::{self, SnapshotRequest};
@@ -64,6 +66,7 @@ enum Tab {
     Scenes,
     NewSession,
     Snapshot,
+    PatchSheet,
     Log,
 }
 
@@ -75,6 +78,7 @@ impl Tab {
             "scenes" => Tab::Scenes,
             "newsession" => Tab::NewSession,
             "snapshot" => Tab::Snapshot,
+            "patchsheet" | "sheet" => Tab::PatchSheet,
             "log" => Tab::Log,
             _ => return None,
         })
@@ -111,7 +115,7 @@ impl SessionForm {
                 .unwrap_or_default(),
             templates: session::discover_templates(),
             connect_inputs: true,
-            allow_minimal: false,
+                    allow_minimal: false,
             first_ch: 1,
             last_ch: cfg.wing.channels.min(32),
             include_unnamed: false,
@@ -232,6 +236,7 @@ struct App {
     form: SessionForm,
     snap_form: SnapForm,
     patch_form: PatchForm,
+    sheet_form: SheetForm,
     /// The "go to timecode" entry.
     tc_input: String,
     /// Where the scrub bar is being dragged to, while it is being dragged.
@@ -252,6 +257,7 @@ impl App {
             form: SessionForm::new(&cfg),
             snap_form: SnapForm::new(&cfg),
             patch_form: PatchForm::new(&cfg),
+            sheet_form: SheetForm::new(&cfg),
             tc_input: String::new(),
             scrubbing: None,
             prefs: Prefs::new(&cfg),
@@ -336,6 +342,7 @@ impl eframe::App for App {
                         Tab::Scenes => self.scenes_tab(ui),
                         Tab::NewSession => self.session_tab(ui),
                         Tab::Snapshot => self.snapshot_tab(ui),
+                        Tab::PatchSheet => self.sheet_tab(ui),
                         Tab::Log => self.log_tab(ui),
                     });
             });
@@ -419,6 +426,7 @@ impl App {
                 (Tab::Scenes, "Scenes & markers"),
                 (Tab::NewSession, "New session"),
                 (Tab::Snapshot, "WING snapshot"),
+                (Tab::PatchSheet, "Patch sheet"),
                 (Tab::Log, "Log"),
             ] {
                 let selected = self.tab == tab;
@@ -1137,6 +1145,7 @@ impl App {
                     tracks: tracks.clone(),
                     template: (!template.is_empty()).then(|| PathBuf::from(template)),
                     connect_inputs: self.form.connect_inputs,
+                    styles: Vec::new(),
                     allow_minimal: self.form.allow_minimal,
                 })));
             }
@@ -1540,4 +1549,423 @@ fn timecode(samples: i64, rate: f64) -> String {
     let m = ((total % 3600.0) / 60.0).floor() as u64;
     let s = total % 60.0;
     format!("{h:02}:{m:02}:{s:06.3}")
+}
+
+// ------------------------------------------------------------ patch sheet ---
+
+/// The patch-sheet tab's state. The build itself needs neither the console nor
+/// the DAW, so unlike the other tabs this one runs on the spot rather than
+/// handing a command to the bridge thread.
+struct SheetForm {
+    sheet: String,
+    base: String,
+    group: String,
+    dest: String,
+    name: String,
+    template: String,
+    templates: Vec<PathBuf>,
+    sample_rate: u32,
+    make_session: bool,
+    connect_inputs: bool,
+    arm: bool,
+    label_sources: bool,
+    keep_unlisted: bool,
+    /// The sheet as last read, or why it could not be.
+    read: Option<Result<sheet::Sheet, String>>,
+    /// What the last Build or Preview did.
+    result: Option<Result<Vec<String>, String>>,
+}
+
+impl SheetForm {
+    fn new(cfg: &Config) -> Self {
+        let templates = session::discover_templates();
+        Self {
+            sheet: String::new(),
+            base: String::new(),
+            group: cfg.patch.output_group.clone(),
+            dest: cfg
+                .livetrax
+                .session_file
+                .as_ref()
+                .and_then(|p| p.parent().and_then(|d| d.parent()))
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            name: String::new(),
+            template: templates.first().map(|p| p.display().to_string()).unwrap_or_default(),
+            templates,
+            sample_rate: 48_000,
+            make_session: true,
+            connect_inputs: true,
+            arm: true,
+            label_sources: true,
+            keep_unlisted: false,
+            read: None,
+            result: None,
+        }
+    }
+
+    fn request(&self) -> patchbuild::BuildRequest {
+        let base = self.base.trim();
+        patchbuild::BuildRequest {
+            base: (!base.is_empty()).then(|| PathBuf::from(base)),
+            record_group: self.group.trim().to_uppercase(),
+            label_sources: self.label_sources,
+            keep_unlisted_outputs: self.keep_unlisted,
+        }
+    }
+}
+
+impl App {
+    fn sheet_tab(&mut self, ui: &mut egui::Ui) {
+        theme::titled_card(ui, "THE SHEET", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "One row per channel: the name, the socket it arrives on, gain, phantom, \
+                     colour, DCA, and which track records it. Both ends of the show are built \
+                     from it, so the console and the DAW cannot disagree.",
+                )
+                .small()
+                .color(DIM),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                theme::field(ui, "Patch sheet");
+                ui.add(egui::TextEdit::singleline(&mut self.sheet_form.sheet).desired_width(360.0));
+                if ui.button("Browse").clicked() {
+                    if let Some(file) = rfd::FileDialog::new()
+                        .add_filter("Spreadsheet", &["csv", "tsv", "txt"])
+                        .pick_file()
+                    {
+                        self.sheet_form.sheet = file.display().to_string();
+                        self.read_sheet();
+                    }
+                }
+                if ui.button("Read").clicked() {
+                    self.read_sheet();
+                }
+                if ui.button("Write a starter sheet").clicked() {
+                    self.write_sheet_template();
+                }
+            });
+            ui.add_space(2.0);
+            match &self.sheet_form.read {
+                None => theme::empty(ui, "No sheet read yet. Pick one, or write a starter sheet to fill in."),
+                Some(Err(e)) => {
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
+                }
+                Some(Ok(sheet)) => {
+                    let tracks = sheet.rows.iter().filter(|r| r.track.is_some()).count();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} channels, {tracks} of them recorded",
+                            sheet.rows.len()
+                        ))
+                        .color(GREEN),
+                    );
+                    if !sheet.unknown_columns.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "carried through untouched: {}",
+                                sheet.unknown_columns.join(", ")
+                            ))
+                            .small()
+                            .color(DIM),
+                        );
+                    }
+                    for w in &sheet.warnings {
+                        ui.label(egui::RichText::new(format!("warning: {w}")).small().color(AMBER));
+                    }
+                }
+            }
+        });
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, "THE CONSOLE", |ui| {
+            ui.horizontal(|ui| {
+                theme::field(ui, "Base snapshot");
+                ui.add(egui::TextEdit::singleline(&mut self.sheet_form.base).desired_width(360.0));
+                if ui.button("Browse").clicked() {
+                    if let Some(file) =
+                        rfd::FileDialog::new().add_filter("WING snapshot", &["snap"]).pick_file()
+                    {
+                        self.sheet_form.base = file.display().to_string();
+                    }
+                }
+                if !self.sheet_form.base.trim().is_empty() && ui.button("Clear").clicked() {
+                    self.sheet_form.base.clear();
+                }
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "");
+                ui.label(
+                    egui::RichText::new(if self.sheet_form.base.trim().is_empty() {
+                        "empty: start from a factory console"
+                    } else {
+                        "the sheet is laid over this file, so its effects and busses survive"
+                    })
+                    .small()
+                    .color(DIM),
+                );
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "Recorded on");
+                ui.add(egui::TextEdit::singleline(&mut self.sheet_form.group).desired_width(80.0));
+                ui.label(
+                    egui::RichText::new("the port group the DAW records - the Track column is an output of it")
+                        .small()
+                        .color(DIM),
+                );
+            });
+            ui.horizontal(|ui| {
+                theme::field(ui, "Options");
+                ui.vertical(|ui| {
+                    ui.checkbox(
+                        &mut self.sheet_form.label_sources,
+                        "put each name, colour and icon on its source as well",
+                    );
+                    ui.checkbox(
+                        &mut self.sheet_form.keep_unlisted,
+                        "leave the record group's other outputs as the base had them",
+                    );
+                });
+            });
+        });
+        ui.add_space(10.0);
+
+        theme::titled_card(ui, "THE SESSION", |ui| {
+            ui.checkbox(&mut self.sheet_form.make_session, "also build a LiveTrax session");
+            ui.add_enabled_ui(self.sheet_form.make_session, |ui| {
+                ui.horizontal(|ui| {
+                    theme::field(ui, "Sessions folder");
+                    ui.add(egui::TextEdit::singleline(&mut self.sheet_form.dest).desired_width(360.0));
+                    if ui.button("Browse").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.sheet_form.dest = dir.display().to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    theme::field(ui, "Template");
+                    ui.add(egui::TextEdit::singleline(&mut self.sheet_form.template).desired_width(360.0));
+                    if ui.button("Browse").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("LiveTrax session", &["ardour", "template"])
+                            .pick_file()
+                        {
+                            self.sheet_form.template = file.display().to_string();
+                        }
+                    }
+                    // The track graph comes from a session your own LiveTrax
+                    // wrote, so the installed templates are the safe choices.
+                    if !self.sheet_form.templates.is_empty() {
+                        egui::ComboBox::from_id_salt("sheet_template")
+                            .selected_text("Installed")
+                            .show_ui(ui, |ui| {
+                                let found = self.sheet_form.templates.clone();
+                                for path in found {
+                                    let label = path
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| path.display().to_string());
+                                    if ui.selectable_label(false, label).clicked() {
+                                        self.sheet_form.template = path.display().to_string();
+                                    }
+                                }
+                            });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    theme::field(ui, "Sample rate");
+                    egui::ComboBox::from_id_salt("sheet_rate")
+                        .selected_text(format!("{} Hz", self.sheet_form.sample_rate))
+                        .show_ui(ui, |ui| {
+                            for rate in [44_100, 48_000, 88_200, 96_000] {
+                                ui.selectable_value(
+                                    &mut self.sheet_form.sample_rate,
+                                    rate,
+                                    format!("{rate} Hz"),
+                                );
+                            }
+                        });
+                    ui.checkbox(&mut self.sheet_form.connect_inputs, "connect inputs");
+                    ui.checkbox(&mut self.sheet_form.arm, "arm the recorded tracks");
+                });
+            });
+        });
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            theme::field(ui, "Show name");
+            ui.add(egui::TextEdit::singleline(&mut self.sheet_form.name).desired_width(240.0));
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let ready = matches!(self.sheet_form.read, Some(Ok(_)))
+                && !self.sheet_form.name.trim().is_empty();
+            if ui.add_enabled(ready, theme::primary("Build")).clicked() {
+                self.build_from_sheet(false);
+            }
+            if ui
+                .add_enabled(matches!(self.sheet_form.read, Some(Ok(_))), egui::Button::new("Preview"))
+                .clicked()
+            {
+                self.build_from_sheet(true);
+            }
+            if !ready {
+                ui.label(
+                    egui::RichText::new("read a sheet and give the show a name")
+                        .small()
+                        .color(DIM),
+                );
+            }
+        });
+
+        if let Some(result) = &self.sheet_form.result {
+            ui.add_space(6.0);
+            theme::card(ui, |ui| match result {
+                Ok(lines) => {
+                    for line in lines {
+                        let colour = match line.split_once(": ") {
+                            Some(("warning", _)) => AMBER,
+                            _ if line.starts_with("  ") => DIM,
+                            _ => TEXT,
+                        };
+                        ui.label(egui::RichText::new(line).small().color(colour));
+                    }
+                }
+                Err(e) => {
+                    ui.label(egui::RichText::new(format!("error: {e}")).color(RED));
+                }
+            });
+        }
+    }
+
+    fn read_sheet(&mut self) {
+        let path = self.sheet_form.sheet.trim().to_string();
+        self.sheet_form.result = None;
+        if path.is_empty() {
+            self.sheet_form.read = None;
+            return;
+        }
+        self.sheet_form.read =
+            Some(sheet::read(std::path::Path::new(&path)).map_err(|e| format!("{e:#}")));
+        // A sheet usually sits beside the show it is for, and the show usually
+        // shares its name - a good enough guess to save typing.
+        if self.sheet_form.name.trim().is_empty() {
+            if let Some(stem) = std::path::Path::new(&path).file_stem() {
+                self.sheet_form.name = stem.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    fn write_sheet_template(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Spreadsheet", &["csv"])
+            .set_file_name("patch-sheet.csv")
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, sheet::template()) {
+            Ok(()) => {
+                self.sheet_form.sheet = path.display().to_string();
+                self.read_sheet();
+            }
+            Err(e) => self.sheet_form.result = Some(Err(format!("writing {}: {e}", path.display()))),
+        }
+    }
+
+    fn build_from_sheet(&mut self, preview: bool) {
+        let Some(Ok(sheet)) = &self.sheet_form.read else { return };
+        let built = match patchbuild::build(sheet, &self.sheet_form.request()) {
+            Ok(b) => b,
+            Err(e) => {
+                self.sheet_form.result = Some(Err(format!("{e:#}")));
+                return;
+            }
+        };
+        let mut lines = vec![format!(
+            "{} channels, {} tracks on {}, {} nodes moved",
+            built.report.channels.len(),
+            built.report.tracks.len(),
+            self.sheet_form.group.trim().to_uppercase(),
+            built.report.changes.len()
+        )];
+        if built.report.cleared > 0 {
+            lines.push(format!(
+                "{} outputs the sheet does not use were switched off",
+                built.report.cleared
+            ));
+        }
+        if preview {
+            for change in built.report.changes.iter().take(400) {
+                lines.push(format!("  {change}"));
+            }
+            if built.report.changes.len() > 400 {
+                lines.push(format!("  ... and {} more", built.report.changes.len() - 400));
+            }
+            for w in &built.report.warnings {
+                lines.push(format!("warning: {w}"));
+            }
+            lines.push("(preview - nothing was written)".into());
+            self.sheet_form.result = Some(Ok(lines));
+            return;
+        }
+
+        let name = self.sheet_form.name.trim().to_string();
+        let mut folder: Option<PathBuf> = None;
+        if self.sheet_form.make_session {
+            let template = self.sheet_form.template.trim();
+            let req = SessionRequest {
+                parent_dir: PathBuf::from(self.sheet_form.dest.trim()),
+                name: name.clone(),
+                sample_rate: self.sheet_form.sample_rate,
+                tracks: patchbuild::daw_names(&built.report.tracks),
+                template: (!template.is_empty()).then(|| PathBuf::from(template)),
+                connect_inputs: self.sheet_form.connect_inputs,
+                allow_minimal: false,
+                styles: built
+                    .report
+                    .tracks
+                    .iter()
+                    .map(|t| session::TrackStyle {
+                        colour: t.colour.and_then(patchbuild::track_colour),
+                        rec_arm: self.sheet_form.arm && t.channel.is_some(),
+                    })
+                    .collect(),
+            };
+            match session::create(&req) {
+                Ok(r) => {
+                    lines.push(format!("created {} with {} tracks", r.session_file.display(), r.tracks));
+                    for w in &r.warnings {
+                        lines.push(format!("warning: {w}"));
+                    }
+                    folder = Some(r.folder);
+                }
+                Err(e) => {
+                    self.sheet_form.result = Some(Err(format!("{e:#}")));
+                    return;
+                }
+            }
+        }
+        // With no session to put it in, the snapshot goes beside the sheet it
+        // was built from, where the person who filled the sheet in will look.
+        let snap = match &folder {
+            Some(f) => f.join(format!("{name}.snap")),
+            None => std::path::Path::new(self.sheet_form.sheet.trim())
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.join(format!("{name}.snap")))
+                .unwrap_or_else(|| PathBuf::from(format!("{name}.snap"))),
+        };
+        if let Err(e) = built.write_snap(&snap) {
+            self.sheet_form.result = Some(Err(format!("{e:#}")));
+            return;
+        }
+        lines.push(format!("wrote {}", snap.display()));
+        for w in &built.report.warnings {
+            lines.push(format!("warning: {w}"));
+        }
+        self.sheet_form.result = Some(Ok(lines));
+    }
 }

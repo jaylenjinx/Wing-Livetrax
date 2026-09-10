@@ -6,8 +6,10 @@ mod gui;
 mod livetrax;
 mod markers;
 mod osc;
+mod patchbuild;
 mod session;
 mod patch;
+mod sheet;
 mod prefs;
 mod shared;
 mod snapfile;
@@ -189,6 +191,65 @@ enum Cmd {
         #[arg(short, long, default_value = "config.toml")]
         output: PathBuf,
     },
+    /// Build a console snapshot and a LiveTrax session from a patch sheet.
+    ///
+    /// The sheet is a CSV exported from whatever the patch was planned in.
+    /// One row per channel: name, the socket it arrives on, gain, phantom,
+    /// colour, DCA, and which track records it. Write a starter sheet with
+    /// `patch-template`.
+    Build {
+        /// The patch sheet (.csv, .tsv).
+        #[arg(long)]
+        sheet: PathBuf,
+        /// Folder that will contain the new session folder. Omit to write only
+        /// the snapshot.
+        #[arg(long)]
+        dest: Option<PathBuf>,
+        /// Show name: the session folder, and the snapshot's file name.
+        #[arg(long)]
+        name: String,
+        /// Where to write the .snap. Defaults to beside the session, or the
+        /// working directory when no session is being made.
+        #[arg(long)]
+        snap: Option<PathBuf>,
+        /// Snapshot to overlay the sheet onto. Defaults to a factory console,
+        /// so pass your own show file to keep its effects and bus structure.
+        #[arg(long)]
+        base: Option<PathBuf>,
+        /// Port group the DAW records from. Defaults to patch.output_group.
+        #[arg(long)]
+        output: Option<String>,
+        /// Session or .template file to clone tracks from.
+        #[arg(long)]
+        template: Option<PathBuf>,
+        #[arg(long, default_value_t = 48_000)]
+        rate: u32,
+        /// Do not point track inputs at system:capture_N.
+        #[arg(long)]
+        no_connect_inputs: bool,
+        /// Do not arm the created tracks for record.
+        #[arg(long)]
+        no_arm: bool,
+        /// Write a synthesised session when no template is available.
+        #[arg(long)]
+        allow_minimal: bool,
+        /// Leave the record group's other outputs as the base had them.
+        #[arg(long)]
+        keep_unlisted_outputs: bool,
+        /// Do not copy each channel's name, colour and icon onto the socket
+        /// it takes. They are kept together because the console can be set to
+        /// show either one on the scribble strip.
+        #[arg(long)]
+        no_source_labels: bool,
+        /// Print every node the sheet would move, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Write a starter patch sheet, with the column reference and an example.
+    PatchTemplate {
+        #[arg(short, long, default_value = "patch-sheet.csv")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -295,6 +356,41 @@ fn main() -> Result<()> {
                 wait_secs,
             },
         )),
+        Cmd::PatchTemplate { output } => cmd_patch_template(&output),
+        Cmd::Build {
+            sheet,
+            dest,
+            name,
+            snap,
+            base,
+            output,
+            template,
+            rate,
+            no_connect_inputs,
+            no_arm,
+            allow_minimal,
+            keep_unlisted_outputs,
+            no_source_labels,
+            dry_run,
+        } => cmd_build(
+            &config_path,
+            BuildArgs {
+                sheet,
+                dest,
+                name,
+                snap,
+                base,
+                output,
+                template,
+                rate,
+                connect_inputs: !no_connect_inputs,
+                arm: !no_arm,
+                allow_minimal,
+                keep_unlisted_outputs,
+                label_sources: !no_source_labels,
+                dry_run,
+            },
+        ),
     }
 }
 
@@ -540,6 +636,7 @@ async fn cmd_new_session(path: &std::path::Path, args: NewSessionArgs) -> Result
         tracks,
         template: args.template,
         connect_inputs: args.connect_inputs,
+        styles: Vec::new(),
         allow_minimal: args.allow_minimal,
     })?;
     println!("created {} with {} tracks", report.session_file.display(), report.tracks);
@@ -997,5 +1094,154 @@ fn cmd_init(output: &std::path::Path) -> Result<()> {
         .with_context(|| format!("writing {}", output.display()))?;
     println!("wrote {}", output.display());
     println!("Edit wing.host and livetrax.host, then run: wing-livetrax-bridge probe");
+    Ok(())
+}
+
+// ------------------------------------------------------------ patch sheet ---
+
+fn cmd_patch_template(output: &std::path::Path) -> Result<()> {
+    if output.exists() {
+        anyhow::bail!("{} already exists - pick another name", output.display());
+    }
+    std::fs::write(output, sheet::template())
+        .with_context(|| format!("writing {}", output.display()))?;
+    println!("wrote {}", output.display());
+    println!(
+        "Open it in Excel, Numbers or Sheets, replace the example rows with your patch,\n\
+         and save it as CSV. Then:\n\n  \
+         wing-livetrax-bridge build --sheet {} --dest ~/Music/Livetrax --name \"My Show\"",
+        output.display()
+    );
+    Ok(())
+}
+
+struct BuildArgs {
+    sheet: PathBuf,
+    dest: Option<PathBuf>,
+    name: String,
+    snap: Option<PathBuf>,
+    base: Option<PathBuf>,
+    output: Option<String>,
+    template: Option<PathBuf>,
+    rate: u32,
+    connect_inputs: bool,
+    arm: bool,
+    allow_minimal: bool,
+    keep_unlisted_outputs: bool,
+    label_sources: bool,
+    dry_run: bool,
+}
+
+fn cmd_build(path: &std::path::Path, args: BuildArgs) -> Result<()> {
+    let cfg = Config::load(path)?;
+    let sheet = sheet::read(&args.sheet)?;
+    let group = args
+        .output
+        .clone()
+        .unwrap_or_else(|| cfg.patch.output_group.clone())
+        .to_uppercase();
+
+    let built = patchbuild::build(
+        &sheet,
+        &patchbuild::BuildRequest {
+            base: args.base.clone(),
+            record_group: group.clone(),
+            label_sources: args.label_sources,
+            keep_unlisted_outputs: args.keep_unlisted_outputs,
+        },
+    )?;
+    let report = &built.report;
+
+    println!(
+        "{}: {} channels, {} tracks on {}",
+        args.sheet.display(),
+        report.channels.len(),
+        report.tracks.len(),
+        group
+    );
+    if !sheet.unknown_columns.is_empty() {
+        println!("carried through untouched: {}", sheet.unknown_columns.join(", "));
+    }
+    match &report.base {
+        Some(p) => println!("overlaid on {}", p.display()),
+        None => println!("overlaid on a factory console"),
+    }
+    println!("{} nodes moved", report.changes.len());
+    if report.cleared > 0 {
+        println!("{} {group} outputs the sheet does not use were switched off", report.cleared);
+    }
+
+    if args.dry_run {
+        for change in &report.changes {
+            println!("  {change}");
+        }
+        for w in &report.warnings {
+            println!("warning: {w}");
+        }
+        println!("\n(dry run - nothing was written)");
+        return Ok(());
+    }
+
+    // The session folder is made first: it refuses to overwrite, and a snapshot
+    // written beside a folder that then fails to appear is just litter.
+    let mut session_folder: Option<PathBuf> = None;
+    if let Some(dest) = &args.dest {
+        let names = patchbuild::daw_names(&report.tracks);
+        let styles = report
+            .tracks
+            .iter()
+            .map(|t| session::TrackStyle {
+                colour: t.colour.and_then(patchbuild::track_colour),
+                rec_arm: args.arm && t.channel.is_some(),
+            })
+            .collect();
+        let created = session::create(&SessionRequest {
+            parent_dir: dest.clone(),
+            name: args.name.clone(),
+            sample_rate: args.rate,
+            tracks: names,
+            template: args.template.clone(),
+            connect_inputs: args.connect_inputs,
+            allow_minimal: args.allow_minimal,
+            styles,
+        })?;
+        println!(
+            "created {} with {} tracks",
+            created.session_file.display(),
+            created.tracks
+        );
+        if let Some(t) = &created.template {
+            println!("cloned from {}", t.display());
+        }
+        for w in &created.warnings {
+            println!("warning: {w}");
+        }
+        session_folder = Some(created.folder);
+    }
+
+    // The snapshot belongs with the show, so it goes inside the session folder
+    // when there is one and beside the sheet when there is not.
+    let snap_path = args.snap.clone().unwrap_or_else(|| {
+        let file = format!("{}.snap", args.name);
+        match &session_folder {
+            Some(folder) => folder.join(file),
+            None => args
+                .sheet
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.join(&file))
+                .unwrap_or_else(|| PathBuf::from(file)),
+        }
+    });
+    built.write_snap(&snap_path)?;
+    println!("wrote {}", snap_path.display());
+
+    for w in &report.warnings {
+        println!("warning: {w}");
+    }
+    println!(
+        "\nLoad the snapshot from the console's library (or open it in WING-Edit), and open\n\
+         the session with Session > Open in LiveTrax."
+    );
     Ok(())
 }

@@ -15,6 +15,8 @@ OSC:
   session whose tracks are named after the WING channels.
 * **Offline WING snapshot** — the reverse: write a LiveTrax session's track
   names into a real `.snap`, with no console or DAW running.
+* **Build a show from a patch sheet** — a spreadsheet of the input list becomes
+  both a loadable console snapshot and a matching LiveTrax session.
 * **Recorded-output selector** — names follow the console's own output patch,
   so track 14 gets the name of whatever the desk actually sends on output 14.
 * **Timecode** — the DAW's SMPTE clock, locate-by-timecode, timecode-named
@@ -109,7 +111,7 @@ switching tabs never interrupts sync.
 * **Scenes & markers** — the scene↔marker map with a "marker found/missing"
   check per row, buttons to recall a scene or locate the DAW, and the full
   marker list.
-* **New session** and **WING snapshot** — described below.
+* **New session**, **WING snapshot** and **Patch sheet** — described below.
 * **Log** — the same log the terminal gets, with warnings and errors coloured.
 * **Settings** — toggle name sync, its direction, and scene linking live;
   choose the session file; write the running configuration back to TOML.
@@ -305,6 +307,127 @@ wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --out mysho
 wing-livetrax-bridge wing-snapshot --session ~/Music/Livetrax/MyShow --apply
 ```
 
+## Build a show from a patch sheet
+
+A patch is planned in a spreadsheet weeks before anyone touches a console: one
+row per channel, with the name, the socket it arrives on, the gain and phantom
+that source needs, a colour, a DCA, and which track it records to. The **Patch
+sheet** tab reads that sheet and builds *both ends of the show from it* — a
+loadable WING snapshot and a LiveTrax session — so the desk and the DAW cannot
+disagree about what is on channel 12.
+
+![Patch sheet tab](docs/ui-sheet.png)
+
+Start from the shipped template, which carries the column reference in comments
+at the top and a worked 24-piece band patch below it:
+
+```bash
+wing-livetrax-bridge patch-template -o patch-sheet.csv
+```
+
+Open it in Excel, Numbers or Sheets, replace the example rows, save as CSV, and:
+
+```bash
+wing-livetrax-bridge build --sheet patch-sheet.csv --dest ~/Music/Livetrax --name "Friday Show"
+```
+
+That writes `~/Music/Livetrax/Friday Show/` with a track per recorded channel
+and `Friday Show.snap` inside it. `--dry-run` prints every node the sheet would
+move and writes nothing.
+
+### The columns
+
+| column | meaning |
+| --- | --- |
+| `Ch` | console channel, 1–40. The only column that must be filled in. |
+| `Name` | channel name, up to 16 characters. |
+| `Source` | the socket it arrives on: `LCL 1`, `A 12`, `USB 3`, `SC 4`, or `Off`. |
+| `Gain` | preamp gain in dB, −3 to 45.5. |
+| `48V` | phantom power. |
+| `Pol` | polarity invert. |
+| `LowCut` | cut frequency in Hz, 20–2000, or `Off`. |
+| `Colour` | the console's 1–18, or a name — `RED`, `GREEN`, `BLUE`, `YELLOW`, `CYAN`, `MAGENTA`, `ORANGE`, `PURPLE`, `TEAL`, `LIME`, `SALMON`, `CORAL`, `MINT`, `INDIGO`, `SKY`, `BROWN`, `GREY`, `WHITE`. |
+| `Icon` | console icon number, 0–999. |
+| `DCA` | DCA membership: `1`, or `1,2`. |
+| `MuteGrp` | mute group membership, 1–8. |
+| `Fader` | fader position in dB, or `Off`. |
+| `Pan` | −100 (left) to 100 (right). |
+| `Main` | assign to the main bus. |
+| `Mute` | start muted. |
+| `Sends` | bus sends as `bus:level` — `"1:-6,3:0"`. A trailing `p` makes one pre-fader. |
+| `Link` | `Yes` on the odd channel of a stereo pair. |
+| `Track` | which record output, and so which DAW track, carries this channel. |
+| `TrackName` | track name, when it should differ from the channel name. |
+
+Columns are found **by name, in any order**, and matched loosely enough that
+`48V`, `48 v` and `Phantom` are one column. Columns the reader does not know —
+`Mic`, `Stand`, `Notes` — are carried through untouched and listed in the
+report, because a real patch list has them and should not have to lose them.
+Yes/no cells accept anything from `Y` to `TRUE` to a tick; numbers survive the
+units people type (`32 dB`, `+4`, a word processor's `−6`); `Off` is understood
+wherever silence makes sense. Every complaint names the line and the column:
+
+```
+Error: reading patch-sheet.csv: line 14, Gain: "99" is outside -3 to 45.5
+```
+
+### What the sheet does and does not decide
+
+**An empty cell means "leave this alone", not "set it to zero".** The sheet is
+an overlay laid onto a base snapshot, so a sheet with only `Ch` and `Name` in it
+changes only names. That base is a factory console unless you pass `--base`,
+which is how you re-patch a show file whose effects, EQ and bus structure should
+survive:
+
+```bash
+wing-livetrax-bridge build --sheet patch-sheet.csv --base "Last Tour.snap" \
+  --dest ~/Music/Livetrax --name "New Tour"
+```
+
+Two rules keep the result loadable. **Nothing is invented** — a node that is not
+already in the base is reported, not created, because a WING snapshot is a fixed
+tree and a node this tool made up would at best be ignored. And **the types are
+the console's**: a whole number is written as an integer and a switch as a
+boolean, which is what the desk and WING-Edit both write.
+
+The one place the sheet's shape and the console's differ is the preamp. Gain,
+phantom and polarity belong to the **socket**, not the channel, so they are
+written by following the channel's input patch to `/io/in/<GRP>/<n>` — which
+means the Source column has to be right for the Gain column to land. A digital
+source has no preamp to set, and says so rather than quietly doing nothing:
+
+```
+warning: line 50: USB 1 has no gain to set
+```
+
+DCA and mute-group membership are not fields of their own on a WING: they are
+**tags** on the channel, `#D1`–`#D16` and `#M1`–`#M8`. Tags you keep there for
+your own grouping survive a DCA change.
+
+Listing sends states the whole picture for that channel — a row that names buses
+1 and 3 is saying bus 2 is *off*, not saying nothing about bus 2.
+
+### The Track column, and why gaps become tracks
+
+`Track` is an output of the record group (`--output`, default `patch.output_group`),
+and that is what makes the two halves line up: the builder points
+`/io/out/USB/<track>` at the channel, and the session's tracks are that group's
+outputs in order, wired to `system:capture_<track>`.
+
+Outputs of that group the sheet does not list are switched off, since the sheet
+is the authority on what gets recorded; `--keep-unlisted-outputs` leaves them.
+A **gap** in the Track column becomes a real, empty, unarmed track — if it were
+simply left out, every track after the gap would record the wrong input.
+
+Each track carries the console colour of the channel feeding it, and the
+recorded ones are armed. Names are made port-safe and unique (`GTR-L`,
+`GTR-L 2`) the same way the New session tab does it.
+
+Because the desk can be set to show a **source's** own name, colour and icon on
+the scribble strip rather than the channel's, the two are kept together: the
+name, colour and icon go onto the socket as well, so whichever the console is
+showing, it is showing the patch sheet. `--no-source-labels` turns that off.
+
 ## Timecode
 
 The header shows the DAW's own SMPTE clock — LiveTrax sends it as
@@ -343,6 +466,8 @@ Hosts and ports need a restart, and the window says so.
 | `run` | run the bridge headless |
 | `new-session --dest D --name N` | build a session named from the console |
 | `wing-snapshot --session S [--out F] [--apply]` | console channel names from a session |
+| `patch-template [-o F]` | write a starter patch sheet |
+| `build --sheet F --dest D --name N` | a snapshot and a session from a patch sheet |
 | `snap-info F [--output USB]` | list a .snap's channel names and output patches |
 | `patch [--output USB] [--groups]` | read the output patch from the live console |
 | `probe [--target wing\|daw\|both] [--filter /ch]` | print every OSC message received |
