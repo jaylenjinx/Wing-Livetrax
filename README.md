@@ -15,7 +15,8 @@ OSC:
   session whose tracks are named after the WING channels.
 * **Offline WING snapshot** — the reverse: write a LiveTrax session's track
   names into a real `.snap`, with no console or DAW running.
-* **Build a show from a patch sheet** — a spreadsheet of the input list becomes
+* **Build a show from a patch sheet** — for a WING, or a session-only build for
+  an Allen & Heath Qu-16/24/32. A spreadsheet of the input list becomes
   both a loadable console snapshot and a matching LiveTrax session.
 * **Recorded-output selector** — names follow the console's own output patch,
   so track 14 gets the name of whatever the desk actually sends on output 14.
@@ -343,6 +344,33 @@ That writes `~/Music/Livetrax/Friday Show/` with a track per recorded channel
 and `Friday Show.snap` inside it. `--dry-run` prints every node the sheet would
 move and writes nothing.
 
+### Other desks
+
+The same sheet builds a session for an **Allen & Heath Qu**:
+
+```bash
+wing-livetrax-bridge build --sheet patch-sheet.csv --desk qu-16 \
+  --dest ~/Music/Livetrax --name "Friday Show"
+```
+
+A Qu has no published file format, so there is no console file to write and no
+live control here — the sheet builds the **LiveTrax session only**, from `Ch`,
+`Name`, `Colour`, `Track` and `TrackName`. Everything else in the sheet is read
+and then reported rather than silently dropped:
+
+```
+patch-sheet.csv: 16 channels, 16 tracks for an Allen & Heath Qu-16
+warning: an Allen & Heath Qu-16 has no console file to write, so these columns
+         were read but not applied: Source, Gain, 48V, DCA
+```
+
+`--desk` takes `wing` (the default), `qu-16`, `qu-24` and `qu-32`, and the same
+choice sits at the top of the Patch sheet tab. Channels past the desk's input
+count are called out — channel 20 on a Qu-16 is a typo worth knowing about
+before the session is built. A sheet with no `Track` column at all still
+describes a session: on a desk that records its inputs in order, track N is
+channel N, and the build says that is what it assumed.
+
 ### The columns
 
 | column | meaning |
@@ -476,6 +504,7 @@ Hosts and ports need a restart, and the window says so.
 | `wing-snapshot --session S [--out F] [--apply]` | console channel names from a session |
 | `patch-template [-o F]` | write a starter patch sheet |
 | `build --sheet F --dest D --name N` | a snapshot and a session from a patch sheet |
+| `build --sheet F --desk qu-16 --dest D --name N` | a session from a patch sheet, for a Qu |
 | `snap-info F [--output USB]` | list a .snap's channel names and output patches |
 | `patch [--output USB] [--groups]` | read the output patch from the live console |
 | `probe [--target wing\|daw\|both] [--filter /ch]` | print every OSC message received |

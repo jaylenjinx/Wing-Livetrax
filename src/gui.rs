@@ -1558,6 +1558,8 @@ fn timecode(samples: i64, rate: f64) -> String {
 /// handing a command to the bridge thread.
 struct SheetForm {
     sheet: String,
+    /// The desk the sheet is for. A Qu builds the session only.
+    desk: patchbuild::Desk,
     base: String,
     group: String,
     dest: String,
@@ -1581,6 +1583,7 @@ impl SheetForm {
         let templates = session::discover_templates();
         Self {
             sheet: String::new(),
+            desk: patchbuild::Desk::default(),
             base: String::new(),
             group: cfg.patch.output_group.clone(),
             dest: cfg
@@ -1607,6 +1610,7 @@ impl SheetForm {
     fn request(&self) -> patchbuild::BuildRequest {
         let base = self.base.trim();
         patchbuild::BuildRequest {
+            desk: self.desk,
             base: (!base.is_empty()).then(|| PathBuf::from(base)),
             record_group: self.group.trim().to_uppercase(),
             label_sources: self.label_sources,
@@ -1628,6 +1632,30 @@ impl App {
                 .color(DIM),
             );
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                theme::field(ui, "Desk");
+                for desk in patchbuild::Desk::ALL {
+                    let picked = self.sheet_form.desk == desk;
+                    let label = egui::RichText::new(desk.label())
+                        .color(if picked { TEXT } else { DIM });
+                    if ui.selectable_label(picked, label).clicked() {
+                        self.sheet_form.desk = desk;
+                    }
+                }
+            });
+            if !self.sheet_form.desk.writes_snapshot() {
+                ui.horizontal(|ui| {
+                    theme::field(ui, "");
+                    ui.label(
+                        egui::RichText::new(
+                            "A Qu has no published file format, so the sheet builds the LiveTrax \
+                             session only. Set the desk up from the same sheet by hand.",
+                        )
+                        .small()
+                        .color(DIM),
+                    );
+                });
+            }
             ui.horizontal(|ui| {
                 theme::field(ui, "Patch sheet");
                 ui.add(egui::TextEdit::singleline(&mut self.sheet_form.sheet).desired_width(360.0));
@@ -1681,6 +1709,20 @@ impl App {
         ui.add_space(10.0);
 
         theme::titled_card(ui, "THE CONSOLE", |ui| {
+            if !self.sheet_form.desk.writes_snapshot() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Nothing to build for {} {}: gain, phantom, colour, DCA and the rest are \
+                         read from the sheet but have no file to go into. The session below is \
+                         built from the same rows.",
+                        self.sheet_form.desk.article(),
+                        self.sheet_form.desk.label()
+                    ))
+                    .small()
+                    .color(DIM),
+                );
+                return;
+            }
             ui.horizontal(|ui| {
                 theme::field(ui, "Base snapshot");
                 ui.add(egui::TextEdit::singleline(&mut self.sheet_form.base).desired_width(360.0));
@@ -1733,7 +1775,12 @@ impl App {
         ui.add_space(10.0);
 
         theme::titled_card(ui, "THE SESSION", |ui| {
-            ui.checkbox(&mut self.sheet_form.make_session, "also build a LiveTrax session");
+            if self.sheet_form.desk.writes_snapshot() {
+                ui.checkbox(&mut self.sheet_form.make_session, "also build a LiveTrax session");
+            } else {
+                // It is the only thing being built, so there is nothing to opt out of.
+                self.sheet_form.make_session = true;
+            }
             ui.add_enabled_ui(self.sheet_form.make_session, |ui| {
                 ui.horizontal(|ui| {
                     theme::field(ui, "Sessions folder");
@@ -1884,13 +1931,23 @@ impl App {
                 return;
             }
         };
-        let mut lines = vec![format!(
-            "{} channels, {} tracks on {}, {} nodes moved",
-            built.report.channels.len(),
-            built.report.tracks.len(),
-            self.sheet_form.group.trim().to_uppercase(),
-            built.report.changes.len()
-        )];
+        let mut lines = vec![if built.snapshot.is_some() {
+            format!(
+                "{} channels, {} tracks on {}, {} nodes moved",
+                built.report.channels.len(),
+                built.report.tracks.len(),
+                self.sheet_form.group.trim().to_uppercase(),
+                built.report.changes.len()
+            )
+        } else {
+            format!(
+                "{} channels, {} tracks for {} {}",
+                built.report.channels.len(),
+                built.report.tracks.len(),
+                self.sheet_form.desk.article(),
+                self.sheet_form.desk.label()
+            )
+        }];
         if built.report.cleared > 0 {
             lines.push(format!(
                 "{} outputs the sheet does not use were switched off",
@@ -1948,6 +2005,14 @@ impl App {
                 }
             }
         }
+        if built.snapshot.is_none() {
+            for w in &built.report.warnings {
+                lines.push(format!("warning: {w}"));
+            }
+            self.sheet_form.result = Some(Ok(lines));
+            return;
+        }
+
         // With no session to put it in, the snapshot goes beside the sheet it
         // was built from, where the person who filled the sheet in will look.
         let snap = match &folder {

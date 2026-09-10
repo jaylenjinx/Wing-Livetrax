@@ -201,6 +201,11 @@ enum Cmd {
         /// The patch sheet (.csv, .tsv).
         #[arg(long)]
         sheet: PathBuf,
+        /// Desk the sheet is for: wing, qu-16, qu-24, qu-32. The Qu desks have
+        /// no published snapshot format, so for those the sheet builds the
+        /// LiveTrax session and nothing else.
+        #[arg(long, default_value = "wing", alias = "console")]
+        desk: String,
         /// Folder that will contain the new session folder. Omit to write only
         /// the snapshot.
         #[arg(long)]
@@ -359,6 +364,7 @@ fn main() -> Result<()> {
         Cmd::PatchTemplate { output } => cmd_patch_template(&output),
         Cmd::Build {
             sheet,
+            desk,
             dest,
             name,
             snap,
@@ -376,6 +382,7 @@ fn main() -> Result<()> {
             &config_path,
             BuildArgs {
                 sheet,
+                desk,
                 dest,
                 name,
                 snap,
@@ -1117,6 +1124,7 @@ fn cmd_patch_template(output: &std::path::Path) -> Result<()> {
 
 struct BuildArgs {
     sheet: PathBuf,
+    desk: String,
     dest: Option<PathBuf>,
     name: String,
     snap: Option<PathBuf>,
@@ -1134,6 +1142,33 @@ struct BuildArgs {
 
 fn cmd_build(path: &std::path::Path, args: BuildArgs) -> Result<()> {
     let cfg = Config::load(path)?;
+    let desk = patchbuild::Desk::from_name(&args.desk).with_context(|| {
+        format!(
+            "{:?} is not a desk I know - try {}",
+            args.desk,
+            patchbuild::Desk::ALL.iter().map(|d| d.slug()).collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    if !desk.writes_snapshot() {
+        anyhow::ensure!(
+            args.base.is_none(),
+            "{} {} has no snapshot to overlay, so --base has nothing to do",
+            desk.article(),
+            desk.label()
+        );
+        anyhow::ensure!(
+            args.snap.is_none(),
+            "{} {} has no snapshot format, so there is nothing to write to --snap",
+            desk.article(),
+            desk.label()
+        );
+        anyhow::ensure!(
+            args.dest.is_some(),
+            "{} {} builds the session only, so --dest is needed to say where it goes",
+            desk.article(),
+            desk.label()
+        );
+    }
     let sheet = sheet::read(&args.sheet)?;
     let group = args
         .output
@@ -1144,6 +1179,7 @@ fn cmd_build(path: &std::path::Path, args: BuildArgs) -> Result<()> {
     let built = patchbuild::build(
         &sheet,
         &patchbuild::BuildRequest {
+            desk,
             base: args.base.clone(),
             record_group: group.clone(),
             label_sources: args.label_sources,
@@ -1152,23 +1188,36 @@ fn cmd_build(path: &std::path::Path, args: BuildArgs) -> Result<()> {
     )?;
     let report = &built.report;
 
-    println!(
-        "{}: {} channels, {} tracks on {}",
-        args.sheet.display(),
-        report.channels.len(),
-        report.tracks.len(),
-        group
-    );
+    if desk.writes_snapshot() {
+        println!(
+            "{}: {} channels, {} tracks on {}",
+            args.sheet.display(),
+            report.channels.len(),
+            report.tracks.len(),
+            group
+        );
+    } else {
+        println!(
+            "{}: {} channels, {} tracks for {} {}",
+            args.sheet.display(),
+            report.channels.len(),
+            report.tracks.len(),
+            desk.article(),
+            desk.label()
+        );
+    }
     if !sheet.unknown_columns.is_empty() {
         println!("carried through untouched: {}", sheet.unknown_columns.join(", "));
     }
-    match &report.base {
-        Some(p) => println!("overlaid on {}", p.display()),
-        None => println!("overlaid on a factory console"),
-    }
-    println!("{} nodes moved", report.changes.len());
-    if report.cleared > 0 {
-        println!("{} {group} outputs the sheet does not use were switched off", report.cleared);
+    if desk.writes_snapshot() {
+        match &report.base {
+            Some(p) => println!("overlaid on {}", p.display()),
+            None => println!("overlaid on a factory console"),
+        }
+        println!("{} nodes moved", report.changes.len());
+        if report.cleared > 0 {
+            println!("{} {group} outputs the sheet does not use were switched off", report.cleared);
+        }
     }
 
     if args.dry_run {
@@ -1217,6 +1266,18 @@ fn cmd_build(path: &std::path::Path, args: BuildArgs) -> Result<()> {
             println!("warning: {w}");
         }
         session_folder = Some(created.folder);
+    }
+
+    if built.snapshot.is_none() {
+        for w in &report.warnings {
+            println!("warning: {w}");
+        }
+        println!(
+            "\nOpen the session with Session > Open in LiveTrax. Set the {} up from the sheet \n\
+             by hand, or from a scene you already have - it has no file format this can write.",
+            desk.label()
+        );
+        return Ok(());
     }
 
     // The snapshot belongs with the show, so it goes inside the session folder

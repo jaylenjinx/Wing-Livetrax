@@ -145,11 +145,20 @@ fn decode(bytes: &[u8]) -> Result<String> {
 
 pub fn parse(text: &str) -> Result<Sheet> {
     let table = split_table(text);
-    let (header_line, headers) = table
+    let filled: Vec<&(usize, Vec<String>)> = table
         .iter()
-        .find(|(_, cells)| cells.iter().any(|c| !c.trim().is_empty()))
+        .filter(|(_, cells)| cells.iter().any(|c| !c.trim().is_empty()))
+        .collect();
+    let first = *filled.first().ok_or_else(|| anyhow!("the sheet is empty"))?;
+    // A patch sheet usually opens with the name of the show, sometimes with a
+    // date under it, so the header is the first row that names a channel
+    // column rather than simply the first row with anything in it.
+    let (header_line, headers) = filled
+        .iter()
+        .take(10)
+        .find(|(_, cells)| cells.iter().any(|c| Col::of(c.trim()) == Some(Col::Channel)))
         .map(|(line, cells)| (*line, cells.clone()))
-        .ok_or_else(|| anyhow!("the sheet is empty"))?;
+        .unwrap_or_else(|| (first.0, first.1.clone()));
 
     let mut sheet = Sheet::default();
     let mut map: BTreeMap<Col, usize> = BTreeMap::new();
@@ -684,14 +693,14 @@ fn source(s: &str) -> Result<SourceRef> {
         )
     })?;
     let index = number(digits)? as i64;
-    if index < 1 || index > 64 {
+    if !(1..=64).contains(&index) {
         bail!("input {index} is outside 1 to 64");
     }
     Ok(SourceRef { group: group.to_string(), index: index as u16 })
 }
 
 /// Console port groups, and the spellings people use for them.
-pub const GROUPS: [(&str, &str); 15] = [
+pub const GROUPS: [(&str, &str); 19] = [
     ("lcl", "LCL"),
     ("local", "LCL"),
     ("l", "LCL"),
@@ -707,6 +716,12 @@ pub const GROUPS: [(&str, &str); 15] = [
     ("usb", "USB"),
     ("crd", "CRD"),
     ("card", "CRD"),
+    // A Qu's sockets, so a Qu sheet's Source column reads. Nothing is patched
+    // from them - they are there to be printed and to survive the round trip.
+    ("dsnake", "DSNAKE"),
+    ("ds", "DSNAKE"),
+    ("slink", "SLINK"),
+    ("sl", "SLINK"),
 ];
 
 fn group_name(word: &str) -> Option<&'static str> {
@@ -735,7 +750,7 @@ fn sends(s: &str) -> Result<Vec<Send>> {
         let bus: u16 = digits
             .parse()
             .map_err(|_| anyhow!("{bus_txt:?} is not a bus number"))?;
-        if bus < 1 || bus > 16 {
+        if !(1..=16).contains(&bus) {
             bail!("bus {bus} is outside 1 to 16");
         }
         // A trailing "p" marks the send pre-fader: "3:-6p".
@@ -809,7 +824,7 @@ pub fn template() -> String {
 /// skipped by the reader, so the documentation travels with the sheet.
 fn reference() -> String {
     let lines: &[(&str, &str)] = &[
-        ("Ch", "console channel, 1-40. The only column that must be filled in."),
+        ("Ch", "console channel: 1-40 on a WING, 1-16 on a Qu-16. The only\n#              column that must be filled in."),
         ("Name", "channel name, up to 16 characters."),
         ("Source", "the socket it arrives on: LCL 1, A 12, USB 3, SC 4, or Off."),
         ("Gain", "preamp gain in dB, -3 to 45.5. Written to the socket, not the channel."),
@@ -830,12 +845,17 @@ fn reference() -> String {
         ("TrackName", "track name, when it should differ from the channel name."),
     ];
     let mut out = String::new();
-    out.push_str("# WING patch sheet. Fill it in, then:\n");
+    out.push_str("# Patch sheet. Fill it in, then:\n");
     out.push_str("#   wing-livetrax-bridge build --sheet this-file.csv --dest ~/Music/Livetrax --name \"My Show\"\n");
+    out.push_str("#\n# That builds a WING snapshot and a LiveTrax session. For an Allen & Heath\n");
+    out.push_str("# Qu, add --desk qu-16 (or qu-24, qu-32): a Qu has no published file format,\n");
+    out.push_str("# so the sheet builds the session only, from Ch, Name, Colour, Track and\n");
+    out.push_str("# TrackName. The rest is read and reported, not applied.\n");
     out.push_str("#\n# Columns are found by name and may appear in any order. An empty cell\n");
     out.push_str("# leaves that setting as the base snapshot had it, so a sheet with only\n");
     out.push_str("# Ch and Name changes only names. Columns not listed here - Mic, Stand,\n");
-    out.push_str("# Notes - are carried through untouched.\n#\n");
+    out.push_str("# Notes - are carried through untouched. A title line above the header is\n");
+    out.push_str("# fine; the header is found by looking for the Ch column.\n#\n");
     for (name, doc) in lines {
         out.push_str(&format!("#   {name:<10} {doc}\n"));
     }

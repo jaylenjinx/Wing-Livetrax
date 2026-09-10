@@ -197,6 +197,48 @@ def main():
               ["KICK", "SNARE", "HAT", "BASS"])
         check("minimal session warns", "warning:" in minimal.stdout)
 
+    # ---- a Qu builds a session from a patch sheet, and nothing else -------
+    sheet_path = os.path.join(tmp, "qu-inputs.csv")
+    open(sheet_path, "w").write(
+        "THE HOLLOWS - INPUT LIST\n"          # a title above the header is normal
+        "Ch,Name,Source,Gain,48V,Track,Mic\n"
+        "1,Kick,Local 1,32,,1,Beta 91\n"
+        "2,Snare,Local 2,28,,2,SM57\n"
+        "3,Bass DI,Local 3,18,Yes,3,DI\n"
+    )
+    qu = subprocess.run([binary, "-c", cfg, "build", "--sheet", sheet_path, "--desk", "qu-16",
+                         "--dest", dest, "--name", "Qu Show", "--template", tpl],
+                        capture_output=True, text=True)
+    out = qu.stdout + qu.stderr
+    check("qu build succeeds", qu.returncode == 0, out)
+    qu_session = os.path.join(dest, "Qu Show", "Qu Show.ardour")
+    check("qu session written", os.path.isfile(qu_session))
+    if os.path.isfile(qu_session):
+        names = [r.get("name") for r in ET.parse(qu_session).getroot()
+                 .find("Routes").findall("Route") if r.get("name") != "Master"]
+        check("tracks come from the sheet", names == ["Kick", "Snare", "Bass DI"], str(names))
+    check("no console file for a qu",
+          not any(f.endswith(".snap") for f in os.listdir(os.path.join(dest, "Qu Show"))))
+    check("columns it could not use are reported",
+          "not applied" in out and "Gain" in out and "48V" in out, out)
+    # A title line above the header is not an error.
+    check("the title row is stepped over", "3 channels" in out, out)
+
+    refused = subprocess.run([binary, "-c", cfg, "build", "--sheet", sheet_path, "--desk", "qu-16",
+                              "--dest", dest, "--name", "Qu Two", "--template", tpl,
+                              "--base", tpl],
+                             capture_output=True, text=True)
+    check("a base snapshot is refused for a qu",
+          refused.returncode != 0 and "nothing to do" in (refused.stdout + refused.stderr),
+          refused.stdout + refused.stderr)
+
+    unknown = subprocess.run([binary, "-c", cfg, "build", "--sheet", sheet_path, "--desk", "x32",
+                              "--dest", dest, "--name", "Nope", "--template", tpl],
+                             capture_output=True, text=True)
+    check("an unknown desk lists the ones there are",
+          unknown.returncode != 0 and "qu-16" in (unknown.stdout + unknown.stderr),
+          unknown.stdout + unknown.stderr)
+
     passed = sum(1 for r in results if r)
     print(f"\n{passed}/{len(results)} checks passed")
     return 0 if passed == len(results) else 1

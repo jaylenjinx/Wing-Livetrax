@@ -524,6 +524,17 @@ wing-livetrax-bridge build --sheet patch-sheet.csv \
       <p>The starter sheet carries its own column reference in comments at the top and a worked 24-piece band patch below it. One row per channel: <code>Ch</code>, <code>Name</code>, <code>Source</code>, <code>Gain</code>, <code>48V</code>, <code>Pol</code>, <code>LowCut</code>, <code>Colour</code>, <code>Icon</code>, <code>DCA</code>, <code>MuteGrp</code>, <code>Fader</code>, <code>Pan</code>, <code>Main</code>, <code>Mute</code>, <code>Sends</code>, <code>Link</code>, <code>Track</code>, <code>TrackName</code>. Columns are found by name in any order, and ones the reader does not know &mdash; Mic, Stand, Notes &mdash; are carried through untouched, because a real patch list has them.</p>
       <p>An empty cell means <em>leave this alone</em>, not <em>set it to zero</em>: the sheet is an overlay onto a base snapshot, so a sheet with only <code>Ch</code> and <code>Name</code> changes only names. Pass <code>--base</code> to lay it over your own show file and keep its effects, EQ and bus structure. Nothing is invented &mdash; a node not already in the base is reported rather than created &mdash; and whole numbers are written as integers, the way the desk and WING-Edit write them.</p>
       <p>Gain, phantom and polarity belong to the <strong>socket</strong> rather than the channel, so they are written by following the channel's input patch to <code>/io/in/&lt;GRP&gt;/&lt;n&gt;</code>: the Source column has to be right for the Gain column to land, and a digital input with no preamp says so instead of quietly doing nothing. DCA and mute-group membership are tags on the channel, <code>#D1</code>&ndash;<code>#D16</code> and <code>#M1</code>&ndash;<code>#M8</code>; tags you keep there for your own grouping survive a DCA change.</p>
+      <h3>Other desks</h3>
+      <p>The same sheet builds a session for an <strong>Allen &amp; Heath Qu</strong>. A Qu has no published file format, so there is no console file to write and no live control here: the sheet builds the <strong>LiveTrax session only</strong>, from <code>Ch</code>, <code>Name</code>, <code>Colour</code>, <code>Track</code> and <code>TrackName</code>.</p>
+      <div class="code"><pre><code>wing-livetrax-bridge build --sheet patch-sheet.csv --desk qu-16 \
+  --dest ~/Music/Livetrax --name "Friday Show"</code></pre></div>
+      <p>Everything else in the sheet is read and then <em>reported</em> rather than quietly dropped, because a sheet that looks obeyed and is not is worse than one that complains:</p>
+      <div class="code"><pre><code>patch-sheet.csv: 16 channels, 16 tracks for an Allen &amp; Heath Qu-16
+<span class="c">warning: an Allen &amp; Heath Qu-16 has no console file to write, so these
+         columns were read but not applied: Source, Gain, 48V, DCA</span></code></pre></div>
+      <p><code>--desk</code> takes <code>wing</code> (the default), <code>qu-16</code>, <code>qu-24</code> and <code>qu-32</code>, and the same choice sits at the top of the Patch sheet tab. Channels past the desk's input count are called out &mdash; channel 20 on a Qu-16 is a typo worth knowing about before the session is built. A sheet with no <code>Track</code> column at all still describes a session: on a desk that records its inputs in order, track N is channel N, and the build says that is what it assumed.</p>
+
+      <h3>How the two halves line up</h3>
       <p>The <code>Track</code> column is an output of the record group, and that is what makes the two halves line up: the builder points <code>/io/out/USB/&lt;track&gt;</code> at the channel, and the session's tracks are that group's outputs in order, wired to <code>system:capture_&lt;track&gt;</code>. A gap in the column becomes a real, empty, unarmed track &mdash; leave it out and every track after the gap records the wrong input. Each track carries the console colour of the channel feeding it. <code>--dry-run</code> prints every node the sheet would move and writes nothing.</p>
     </section>
 
@@ -541,7 +552,7 @@ wing-livetrax-bridge build --sheet patch-sheet.csv \
             <tr><td><code>new-session</code></td><td>Build a LiveTrax session named from the console or from a snapshot.</td></tr>
             <tr><td><code>wing-snapshot</code></td><td>Console channel names from a session; write a file and/or apply them.</td></tr>
             <tr><td><code>patch-template</code></td><td>Write a starter patch sheet, with the column reference and an example.</td></tr>
-            <tr><td><code>build</code></td><td>A console snapshot and a LiveTrax session from a patch sheet.</td></tr>
+            <tr><td><code>build</code></td><td>A console snapshot and a LiveTrax session from a patch sheet. <code>--desk qu-16</code> builds the session only.</td></tr>
             <tr><td><code>probe</code></td><td>Print every OSC message received, changing nothing.</td></tr>
             <tr><td><code>learn</code></td><td>Print ready-to-paste config for whatever console control you touch.</td></tr>
             <tr><td><code>strips</code></td><td>Ask LiveTrax for its strip list.</td></tr>

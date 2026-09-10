@@ -30,8 +30,85 @@ use crate::sheet::{Row, Sheet, SourceRef};
 /// tree, so every node the builder wants to write already exists in it.
 const FACTORY: &str = include_str!("../assets/wing-compact.snap");
 
+/// Which desk the sheet describes.
+///
+/// A WING has a documented snapshot format, so a sheet can be turned into a
+/// console file as well as a session. A Qu has no such thing in public, so for
+/// those the sheet builds the session and nothing else - which is all it is
+/// asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Desk {
+    #[default]
+    Wing,
+    Qu16,
+    Qu24,
+    Qu32,
+}
+
+impl Desk {
+    pub const ALL: [Desk; 4] = [Desk::Wing, Desk::Qu16, Desk::Qu24, Desk::Qu32];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Desk::Wing => "Behringer WING",
+            Desk::Qu16 => "Allen & Heath Qu-16",
+            Desk::Qu24 => "Allen & Heath Qu-24",
+            Desk::Qu32 => "Allen & Heath Qu-32",
+        }
+    }
+
+    /// "a WING", "an Allen & Heath Qu-16".
+    pub fn article(self) -> &'static str {
+        match self {
+            Desk::Wing => "a",
+            Desk::Qu16 | Desk::Qu24 | Desk::Qu32 => "an",
+        }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Desk::Wing => "wing",
+            Desk::Qu16 => "qu-16",
+            Desk::Qu24 => "qu-24",
+            Desk::Qu32 => "qu-32",
+        }
+    }
+
+    /// Mono input channels, where the desk has a fixed number.
+    pub fn inputs(self) -> Option<u16> {
+        match self {
+            Desk::Wing => None,
+            Desk::Qu16 => Some(16),
+            Desk::Qu24 => Some(24),
+            Desk::Qu32 => Some(32),
+        }
+    }
+
+    /// Whether a console file can be written for it.
+    pub fn writes_snapshot(self) -> bool {
+        matches!(self, Desk::Wing)
+    }
+
+    pub fn from_name(raw: &str) -> Option<Desk> {
+        let folded: String = raw
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        Some(match folded.as_str() {
+            "wing" | "wingcompact" | "wingrack" | "wingfull" => Desk::Wing,
+            "qu16" => Desk::Qu16,
+            "qu24" => Desk::Qu24,
+            "qu32" => Desk::Qu32,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BuildRequest {
+    /// The desk the sheet is for.
+    pub desk: Desk,
     /// Base snapshot to overlay the sheet onto. `None` uses the factory tree.
     pub base: Option<PathBuf>,
     /// Port group the DAW records from, e.g. `USB`.
@@ -46,6 +123,7 @@ pub struct BuildRequest {
 impl Default for BuildRequest {
     fn default() -> Self {
         Self {
+            desk: Desk::default(),
             base: None,
             record_group: "USB".into(),
             label_sources: true,
@@ -100,20 +178,29 @@ pub struct Report {
     /// Outputs of the record group switched off because the sheet omitted them.
     pub cleared: usize,
     pub base: Option<PathBuf>,
+    pub desk: Desk,
 }
 
 #[derive(Debug)]
 pub struct Built {
-    pub snapshot: Value,
+    /// The console file, for desks that have one.
+    pub snapshot: Option<Value>,
     pub report: Report,
 }
 
 impl Built {
     pub fn write_snap(&self, path: &Path) -> Result<()> {
+        let Some(snapshot) = &self.snapshot else {
+            bail!(
+                "there is no console file to write for {} {} - the sheet builds the session only",
+                self.report.desk.article(),
+                self.report.desk.label()
+            );
+        };
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).ok();
         }
-        let text = serde_json::to_string(&self.snapshot).context("serialising the snapshot")?;
+        let text = serde_json::to_string(snapshot).context("serialising the snapshot")?;
         std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
@@ -122,6 +209,9 @@ impl Built {
 // ------------------------------------------------------------------ build ---
 
 pub fn build(sheet: &Sheet, req: &BuildRequest) -> Result<Built> {
+    if !req.desk.writes_snapshot() {
+        return build_tracks_only(sheet, req);
+    }
     let text = match &req.base {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("reading base snapshot {}", path.display()))?,
@@ -139,6 +229,7 @@ pub fn build(sheet: &Sheet, req: &BuildRequest) -> Result<Built> {
     }
 
     let mut w = Writer { root: &mut root, report: Report::default() };
+    w.report.desk = req.desk;
     w.report.base = req.base.clone();
     w.report.warnings.extend(sheet.warnings.iter().cloned());
 
@@ -157,7 +248,137 @@ pub fn build(sheet: &Sheet, req: &BuildRequest) -> Result<Built> {
     w.stamp();
 
     let report = w.report;
-    Ok(Built { snapshot: root, report })
+    Ok(Built { snapshot: Some(root), report })
+}
+
+/// A desk with no snapshot format: read the sheet, build the track list, and
+/// say plainly which columns had nowhere to go.
+fn build_tracks_only(sheet: &Sheet, req: &BuildRequest) -> Result<Built> {
+    let mut report = Report { desk: req.desk, ..Report::default() };
+    report.warnings.extend(sheet.warnings.iter().cloned());
+    report.channels = sheet.rows.iter().map(|r| r.channel).collect();
+
+    if let Some(inputs) = req.desk.inputs() {
+        for row in sheet.rows.iter().filter(|r| r.channel > inputs) {
+            report.warnings.push(format!(
+                "line {}: channel {} is past the {inputs} inputs of {} {}",
+                row.line,
+                row.channel,
+                req.desk.article(),
+                req.desk.label()
+            ));
+        }
+    }
+
+    let unusable = unusable_columns(sheet);
+    if !unusable.is_empty() {
+        report.warnings.push(format!(
+            "{} {} has no console file to write, so these columns were read but not applied: {}",
+            req.desk.article(),
+            req.desk.label(),
+            unusable.join(", ")
+        ));
+    }
+
+    report.tracks = track_list(sheet, &mut report);
+    Ok(Built { snapshot: None, report })
+}
+
+/// Columns that only mean something when a console file is being written.
+fn unusable_columns(sheet: &Sheet) -> Vec<&'static str> {
+    // Checked column by column so they are reported in the order the sheet's
+    // own column reference lists them, not the order the rows happened to
+    // fill them in.
+    type Present = fn(&Row) -> bool;
+    let columns: [(&'static str, Present); 14] = [
+        ("Source", |r| r.source.is_some()),
+        ("Gain", |r| r.gain.is_some()),
+        ("48V", |r| r.phantom.is_some()),
+        ("Polarity", |r| r.polarity.is_some()),
+        ("Low Cut", |r| r.low_cut.is_some()),
+        ("Icon", |r| r.icon.is_some()),
+        ("DCA", |r| r.dca.is_some()),
+        ("Mute Group", |r| r.mute_group.is_some()),
+        ("Fader", |r| r.fader.is_some()),
+        ("Pan", |r| r.pan.is_some()),
+        ("Main", |r| r.main.is_some()),
+        ("Mute", |r| r.mute.is_some()),
+        ("Sends", |r| r.sends.is_some()),
+        ("Link", |r| r.link.is_some()),
+    ];
+    columns
+        .iter()
+        .filter(|(_, used)| sheet.rows.iter().any(used))
+        .map(|(label, _)| *label)
+        .collect()
+}
+
+/// Which row records to which track.
+///
+/// A sheet with no Track column at all is not a sheet without tracks: on a desk
+/// that records its inputs in order, track N is channel N, and saying so beats
+/// producing nothing.
+fn track_map(sheet: &Sheet) -> (BTreeMap<u16, &Row>, bool) {
+    let numbered = sheet.rows.iter().any(|r| r.track.is_some());
+    let mut by_track: BTreeMap<u16, &Row> = BTreeMap::new();
+    for row in &sheet.rows {
+        match row.track {
+            Some(track) => {
+                by_track.insert(track, row);
+            }
+            None if !numbered => {
+                by_track.insert(row.channel, row);
+            }
+            None => {}
+        }
+    }
+    (by_track, !numbered)
+}
+
+/// The DAW's tracks in order. A gap in the middle becomes a real, empty track,
+/// otherwise every track after it records the wrong channel.
+fn track_list(sheet: &Sheet, report: &mut Report) -> Vec<Track> {
+    let (by_track, from_channels) = track_map(sheet);
+    if from_channels && !by_track.is_empty() {
+        report
+            .warnings
+            .push("the sheet has no Track column, so tracks follow the channel numbers".into());
+    }
+    let last = by_track.keys().copied().max().unwrap_or(0);
+    let mut tracks = Vec::new();
+    for n in 1..=last {
+        match by_track.get(&n) {
+            Some(row) => tracks.push(Track {
+                output: n,
+                name: row.daw_name(),
+                channel: Some(row.channel),
+                colour: row.colour,
+            }),
+            None => {
+                report.filler += 1;
+                tracks.push(Track {
+                    output: n,
+                    name: format!("Track {n}"),
+                    channel: None,
+                    colour: None,
+                });
+            }
+        }
+    }
+    if report.filler > 0 {
+        let n = report.filler;
+        report.warnings.push(if n == 1 {
+            "one track in the middle of the range carries no channel; it is created empty so \
+             the tracks after it stay on the right inputs"
+                .to_string()
+        } else {
+            format!(
+                "{n} tracks in the middle of the range carry no channel; they are created \
+                 empty so the tracks after them stay on the right inputs"
+            )
+        });
+    }
+    tracks
 }
 
 struct Writer<'a> {
@@ -382,10 +603,7 @@ impl Writer<'_> {
     /// Point each listed output of the record group at its channel, so DAW
     /// track N really does carry the channel the sheet put on track N.
     fn record_patch(&mut self, sheet: &Sheet, group: &str, req: &BuildRequest) {
-        let mut by_track: BTreeMap<u16, &Row> = BTreeMap::new();
-        for row in sheet.rows.iter().filter(|r| r.track.is_some()) {
-            by_track.insert(row.track.unwrap(), row);
-        }
+        let (by_track, _) = track_map(sheet);
         let outputs = self.count(&format!("ae_data/io/out/{group}"));
         for (track, row) in &by_track {
             let out = format!("ae_data/io/out/{group}/{track}");
@@ -412,42 +630,9 @@ impl Writer<'_> {
             }
         }
 
-        // The DAW's tracks are the record group's outputs in order, so a gap in
-        // the Track column has to become a real, empty track - otherwise every
-        // track after the gap records the wrong channel.
-        let last = by_track.keys().copied().max().unwrap_or(0);
-        for n in 1..=last {
-            match by_track.get(&n) {
-                Some(row) => self.report.tracks.push(Track {
-                    output: n,
-                    name: row.daw_name(),
-                    channel: Some(row.channel),
-                    colour: row.colour,
-                }),
-                None => {
-                    self.report.filler += 1;
-                    self.report.tracks.push(Track {
-                        output: n,
-                        name: format!("Track {n}"),
-                        channel: None,
-                        colour: None,
-                    });
-                }
-            }
-        }
-        if self.report.filler > 0 {
-            let n = self.report.filler;
-            self.warn(if n == 1 {
-                "one track in the middle of the range carries no channel; it is created \
-                 empty so the tracks after it stay on the right inputs"
-                    .to_string()
-            } else {
-                format!(
-                    "{n} tracks in the middle of the range carry no channel; they are created \
-                     empty so the tracks after them stay on the right inputs"
-                )
-            });
-        }
+        // The track list itself is the same on any desk, so it is worked out
+        // in one place.
+        self.report.tracks = track_list(sheet, &mut self.report);
     }
 
     /// Say when the file was written, and leave the rest of the base's identity
@@ -630,12 +815,88 @@ mod tests {
         build(&sheet, &BuildRequest::default()).expect("build should succeed")
     }
 
+    /// The snapshot a WING build produces. Desks without one are tested
+    /// through their report instead.
+    fn tree(out: &Built) -> &Value {
+        out.snapshot.as_ref().expect("this desk writes a snapshot")
+    }
+
     fn at<'a>(v: &'a Value, path: &str) -> &'a Value {
         let mut node = v;
         for key in path.split('/') {
             node = node.get(key).unwrap_or_else(|| panic!("no node at {path}"));
         }
         node
+    }
+
+    /// A build for a desk that has no snapshot format.
+    fn deskless(text: &str, desk: Desk) -> Built {
+        let sheet = sheet::parse(text).expect("sheet should parse");
+        build(&sheet, &BuildRequest { desk, ..BuildRequest::default() })
+            .expect("build should succeed")
+    }
+
+    #[test]
+    fn a_qu_builds_the_session_and_no_console_file() {
+        let out = deskless("Ch,Name,Track\n1,Kick,1\n2,Snare,2\n3,Hat,3\n", Desk::Qu16);
+        assert!(out.snapshot.is_none(), "a Qu has no file format for this to write");
+        assert_eq!(daw_names(&out.report.tracks), ["Kick", "Snare", "Hat"]);
+        // ...and asking for one says so rather than writing something useless.
+        let path = std::env::temp_dir().join("wltb-should-not-appear.snap");
+        assert!(out.write_snap(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_sheet_with_no_track_column_records_its_channels_in_order() {
+        // A Qu-Drive records its inputs in order, so a sheet that never
+        // mentions tracks still describes a session.
+        let out = deskless("Ch,Name\n1,Kick\n2,Snare\n3,Hat\n", Desk::Qu16);
+        assert_eq!(daw_names(&out.report.tracks), ["Kick", "Snare", "Hat"]);
+        assert!(
+            out.report.warnings.iter().any(|w| w.contains("no Track column")),
+            "it should say it made that assumption: {:?}",
+            out.report.warnings
+        );
+    }
+
+    #[test]
+    fn a_qu_says_which_columns_it_could_not_use() {
+        // The sheet is the same one the WING build uses, so it will have
+        // columns a Qu cannot take. Ignoring them quietly would leave the
+        // sheet looking obeyed.
+        let out = deskless("Ch,Name,Gain,48V,DCA\n1,Kick,32,Yes,1\n", Desk::Qu16);
+        let warning = out
+            .report
+            .warnings
+            .iter()
+            .find(|w| w.contains("not applied"))
+            .unwrap_or_else(|| panic!("expected a warning: {:?}", out.report.warnings));
+        for column in ["Gain", "48V", "DCA"] {
+            assert!(warning.contains(column), "{column} missing from {warning:?}");
+        }
+    }
+
+    #[test]
+    fn a_qu_16_notices_channels_it_does_not_have() {
+        let small = deskless("Ch,Name\n1,Kick\n20,Spare\n", Desk::Qu16);
+        assert!(
+            small.report.warnings.iter().any(|w| w.contains("past the 16 inputs")),
+            "{:?}",
+            small.report.warnings
+        );
+        // The same sheet is fine on a desk that has the input.
+        let large = deskless("Ch,Name\n1,Kick\n20,Spare\n", Desk::Qu32);
+        assert!(!large.report.warnings.iter().any(|w| w.contains("past the")));
+    }
+
+    #[test]
+    fn a_gap_in_the_tracks_stays_a_gap() {
+        // Track 2 is empty, so track 3 is still the channel the sheet put
+        // there rather than sliding up one.
+        let out = deskless("Ch,Name,Track\n1,Kick,1\n3,Hat,3\n", Desk::Qu16);
+        assert_eq!(daw_names(&out.report.tracks), ["Kick", "Track 2", "Hat"]);
+        assert_eq!(out.report.filler, 1);
     }
 
     #[test]
@@ -650,7 +911,7 @@ mod tests {
         }
         let base: Value = serde_json::from_str(FACTORY).unwrap();
         let out = built("Ch,Name,Source,Gain\n1,Kick,LCL 1,32\n");
-        assert_eq!(count(&base), count(&out.snapshot));
+        assert_eq!(count(&base), count(tree(&out)));
     }
 
     #[test]
@@ -658,13 +919,13 @@ mod tests {
         // The sheet reads as though gain belonged to the channel; the console
         // keeps it on the input, so the Source column is what steers it.
         let out = built("Ch,Name,Source,Gain,48V,Pol\n5,Hat,LCL 9,26,Yes,Yes\n");
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/LCL/9/g"), 26);
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/LCL/9/vph"), true);
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/LCL/9/pol"), true);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/5/in/conn/grp"), "LCL");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/5/in/conn/in"), 9);
+        assert_eq!(at(tree(&out), "ae_data/io/in/LCL/9/g"), 26);
+        assert_eq!(at(tree(&out), "ae_data/io/in/LCL/9/vph"), true);
+        assert_eq!(at(tree(&out), "ae_data/io/in/LCL/9/pol"), true);
+        assert_eq!(at(tree(&out), "ae_data/ch/5/in/conn/grp"), "LCL");
+        assert_eq!(at(tree(&out), "ae_data/ch/5/in/conn/in"), 9);
         // ...and the socket that channel 5 used to own is left alone.
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/LCL/5/g"), 0);
+        assert_eq!(at(tree(&out), "ae_data/io/in/LCL/5/g"), 0);
     }
 
     #[test]
@@ -678,14 +939,14 @@ mod tests {
             out.report.warnings
         );
         // Polarity is not a preamp trick, so the digital input keeps that one.
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/USB/1/pol"), true);
+        assert_eq!(at(tree(&out), "ae_data/io/in/USB/1/pol"), true);
     }
 
     #[test]
     fn a_channel_with_nothing_patched_keeps_its_polarity_on_the_channel() {
         let out = built("Ch,Name,Source,Gain,Pol\n1,Spare,Off,20,Yes\n");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/in/conn/grp"), "OFF");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/in/set/inv"), true);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/in/conn/grp"), "OFF");
+        assert_eq!(at(tree(&out), "ae_data/ch/1/in/set/inv"), true);
         assert!(
             out.report.warnings.iter().any(|w| w.contains("nowhere to go")),
             "{:?}",
@@ -696,7 +957,7 @@ mod tests {
     #[test]
     fn dca_and_mute_groups_are_written_as_the_consoles_tags() {
         let out = built("Ch,Name,DCA,MuteGrp\n1,Kick,\"1,2\",3\n");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/tags"), "#D1 #D2 #M3");
+        assert_eq!(at(tree(&out), "ae_data/ch/1/tags"), "#D1 #D2 #M3");
     }
 
     #[test]
@@ -714,7 +975,7 @@ mod tests {
             &BuildRequest { base: Some(path), ..BuildRequest::default() },
         )
         .unwrap();
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/tags"), "STAGE-LEFT #D3");
+        assert_eq!(at(tree(&out), "ae_data/ch/1/tags"), "STAGE-LEFT #D3");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -723,19 +984,19 @@ mod tests {
         // A sheet that names bus 1 and 3 is saying bus 2 is off, not saying
         // nothing about bus 2.
         let out = built("Ch,Name,Sends\n1,Kick,\"1:-6,3:0\"\n");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/send/1/on"), true);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/send/1/lvl"), -6);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/send/2/on"), false);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/send/3/on"), true);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/send/1/on"), true);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/send/1/lvl"), -6);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/send/2/on"), false);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/send/3/on"), true);
     }
 
     #[test]
     fn the_record_patch_puts_each_channel_on_its_own_track() {
         let out = built("Ch,Name,Track\n5,Bass,1\n9,Vox,2\n");
-        assert_eq!(at(&out.snapshot, "ae_data/io/out/USB/1/grp"), "CH");
-        assert_eq!(at(&out.snapshot, "ae_data/io/out/USB/1/in"), 5);
-        assert_eq!(at(&out.snapshot, "ae_data/io/out/USB/2/in"), 9);
-        assert_eq!(at(&out.snapshot, "ae_data/io/out/USB/3/grp"), "OFF");
+        assert_eq!(at(tree(&out), "ae_data/io/out/USB/1/grp"), "CH");
+        assert_eq!(at(tree(&out), "ae_data/io/out/USB/1/in"), 5);
+        assert_eq!(at(tree(&out), "ae_data/io/out/USB/2/in"), 9);
+        assert_eq!(at(tree(&out), "ae_data/io/out/USB/3/grp"), "OFF");
         assert_eq!(out.report.tracks.len(), 2);
         assert_eq!(out.report.tracks[0].name, "Bass");
     }
@@ -749,7 +1010,7 @@ mod tests {
         let names: Vec<&str> = out.report.tracks.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Kick", "Snare", "Track 3", "Vox"]);
         assert!(out.report.tracks[2].channel.is_none());
-        assert_eq!(at(&out.snapshot, "ae_data/io/out/USB/4/in"), 3);
+        assert_eq!(at(tree(&out), "ae_data/io/out/USB/4/in"), 3);
     }
 
     #[test]
@@ -815,10 +1076,10 @@ mod tests {
     fn the_shipped_template_builds_a_console() {
         let out = built(&sheet::template());
         assert_eq!(out.report.channels.len(), 24);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/1/name"), "Kick In");
-        assert_eq!(at(&out.snapshot, "ae_data/ch/16/name"), "Lead Vox");
-        assert_eq!(at(&out.snapshot, "ae_data/io/in/LCL/4/pol"), true);
-        assert_eq!(at(&out.snapshot, "ae_data/ch/19/main/1/on"), false);
+        assert_eq!(at(tree(&out), "ae_data/ch/1/name"), "Kick In");
+        assert_eq!(at(tree(&out), "ae_data/ch/16/name"), "Lead Vox");
+        assert_eq!(at(tree(&out), "ae_data/io/in/LCL/4/pol"), true);
+        assert_eq!(at(tree(&out), "ae_data/ch/19/main/1/on"), false);
         assert_eq!(out.report.tracks.len(), 24);
     }
 }
