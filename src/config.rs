@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default)]
+    pub console: ConsoleCfg,
     pub wing: Wing,
+    #[serde(default)]
+    pub qu: Qu,
     pub livetrax: LiveTrax,
     #[serde(default)]
     pub names: Names,
@@ -45,12 +49,100 @@ impl Config {
             self.wing.name_address.contains("{ch}"),
             "wing.name_address must contain the {{ch}} placeholder"
         );
-        anyhow::ensure!(self.wing.channels > 0, "wing.channels must be > 0");
+        anyhow::ensure!(self.channels() > 0, "the console needs at least one channel");
         Ok(())
+    }
+
+    /// Input channels on whichever console is configured.
+    pub fn channels(&self) -> u16 {
+        match self.console.kind {
+            ConsoleKind::Wing => self.wing.channels,
+            ConsoleKind::Qu => self.qu.channels,
+        }
+    }
+
+    /// How often to re-read names from the console. 0 means never.
+    pub fn name_poll_interval_ms(&self) -> u64 {
+        match self.console.kind {
+            ConsoleKind::Wing => self.wing.name_poll_interval_ms,
+            ConsoleKind::Qu => self.qu.name_poll_interval_ms,
+        }
     }
 }
 
 // ---------------------------------------------------------------- console ---
+
+/// Which desk is on the other end.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ConsoleCfg {
+    #[serde(default)]
+    pub kind: ConsoleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConsoleKind {
+    /// Behringer WING, over OSC.
+    #[default]
+    Wing,
+    /// Allen & Heath Qu, over MIDI on TCP.
+    Qu,
+}
+
+impl ConsoleKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ConsoleKind::Wing => "Behringer WING",
+            ConsoleKind::Qu => "Allen & Heath Qu",
+        }
+    }
+}
+
+/// Allen & Heath Qu, over MIDI on TCP.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Qu {
+    pub host: String,
+    /// The mixer's MIDI-over-TCP port. A&H fix this at 51325.
+    #[serde(default = "d_qu_port")]
+    pub port: u16,
+    /// Input channels to mirror: 16 on a Qu-16.
+    #[serde(default = "d_qu_channels")]
+    pub channels: u16,
+    /// MIDI channel, 0-15. Left unset it is learned from the mixer's own reply,
+    /// which is the only way to know it for certain.
+    #[serde(default)]
+    pub midi_channel: Option<u8>,
+    /// Active Sense interval. The mixer hangs up after twelve seconds of
+    /// silence, so this stays well inside its 300 ms guidance.
+    #[serde(default = "d_active_sense_ms")]
+    pub active_sense_ms: u64,
+    #[serde(default = "d_reconnect_ms")]
+    pub reconnect_ms: u64,
+    /// The Qu answers name requests rather than announcing changes, so names
+    /// are re-read on this interval.
+    #[serde(default = "d_qu_name_poll_ms")]
+    pub name_poll_interval_ms: u64,
+}
+
+impl Default for Qu {
+    fn default() -> Self {
+        Self {
+            host: "192.168.1.70".into(),
+            port: d_qu_port(),
+            channels: d_qu_channels(),
+            midi_channel: None,
+            active_sense_ms: d_active_sense_ms(),
+            reconnect_ms: d_reconnect_ms(),
+            name_poll_interval_ms: d_qu_name_poll_ms(),
+        }
+    }
+}
+
+fn d_qu_port() -> u16 { 51_325 }
+fn d_qu_channels() -> u16 { 16 }
+fn d_active_sense_ms() -> u64 { 250 }
+fn d_reconnect_ms() -> u64 { 2_000 }
+fn d_qu_name_poll_ms() -> u64 { 10_000 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Wing {

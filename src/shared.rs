@@ -47,7 +47,7 @@ pub struct Snapshot {
     /// Last sample the DAW reports for the session, for the scrub bar.
     pub session_end: i64,
     /// What the console has sent lately, so a button can be learned.
-    pub console_events: Vec<ConsoleEvent>,
+    pub console_events: Vec<ConsoleActivity>,
     pub position: i64,
     pub current_scene: Option<i32>,
     pub current_marker: Option<String>,
@@ -77,7 +77,7 @@ pub struct Snapshot {
 /// A message the console sent that was not a channel name: the raw material
 /// for learning a button binding.
 #[derive(Debug, Clone)]
-pub struct ConsoleEvent {
+pub struct ConsoleActivity {
     /// Rises with every message, so the interface can spot a new one.
     pub seq: u64,
     pub address: String,

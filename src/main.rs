@@ -2,15 +2,18 @@
 
 mod bridge;
 mod config;
+mod console;
 mod gui;
 mod livetrax;
 mod markers;
+mod midi;
 mod osc;
 mod patchbuild;
 mod session;
 mod patch;
 mod sheet;
 mod prefs;
+mod qu;
 mod shared;
 mod snapfile;
 mod snapshot;
@@ -471,11 +474,11 @@ async fn open_daw(cfg: &Config) -> Result<(Daw, tokio::sync::mpsc::Receiver<Inco
 
 async fn cmd_run(path: &std::path::Path) -> Result<()> {
     let cfg = Config::load(path)?;
-    let (wing, wing_rx) = open_wing(&cfg).await?;
+    let (console, console_rx) = console::Console::open(&cfg).await?;
     let (daw, daw_rx) = open_daw(&cfg).await?;
     // The sender is held so the command branch never sees a closed channel.
     let (_tx, cmd_rx) = command_channel();
-    bridge::Bridge::new(cfg, wing, daw).run(wing_rx, daw_rx, cmd_rx).await
+    bridge::Bridge::new(cfg, console, daw).run(console_rx, daw_rx, cmd_rx).await
 }
 
 /// The GUI runs on the main thread; the bridge gets a runtime of its own.
@@ -499,7 +502,7 @@ fn cmd_gui(
         .name("bridge".into())
         .spawn(move || {
             runtime.block_on(async move {
-                let wing = match open_wing(&bridge_cfg).await {
+                let console = match console::Console::open(&bridge_cfg).await {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::error!("console link: {e:#}");
@@ -513,8 +516,9 @@ fn cmd_gui(
                         return;
                     }
                 };
-                let bridge = bridge::Bridge::new(bridge_cfg, wing.0, daw.0).attach_ui(bridge_state);
-                if let Err(e) = bridge.run(wing.1, daw.1, cmd_rx).await {
+                let bridge =
+                    bridge::Bridge::new(bridge_cfg, console.0, daw.0).attach_ui(bridge_state);
+                if let Err(e) = bridge.run(console.1, daw.1, cmd_rx).await {
                     tracing::error!("bridge stopped: {e:#}");
                 }
             });

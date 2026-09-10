@@ -11,7 +11,7 @@ use crate::config::{
     Action, Arg, ButtonMap, Config, Direction, LedMap, LedSource, Pair, PatchSource, RecArmMap,
     SceneDirection, SceneMarker,
 };
-use crate::shared::{Command, ConsoleEvent};
+use crate::shared::{Command, ConsoleActivity};
 use crate::theme::{self, ACCENT, AMBER, DIM, TEXT};
 use crate::timecode::Fps;
 
@@ -121,7 +121,7 @@ impl Prefs {
         &mut self,
         ctx: &egui::Context,
         cfg_path: &Path,
-        console: &[ConsoleEvent],
+        console: &[ConsoleActivity],
     ) -> Vec<Command> {
         let mut commands = Vec::new();
         if !self.open {
@@ -321,7 +321,7 @@ impl Prefs {
     }
 
     /// A press on the console fills the row that asked for it.
-    fn take_learned_press(&mut self, console: &[ConsoleEvent]) {
+    fn take_learned_press(&mut self, console: &[ConsoleActivity]) {
         let Some(index) = self.learning else { return };
         // Only a press counts; the release that follows it would overwrite.
         let Some(event) = console
@@ -338,7 +338,7 @@ impl Prefs {
         self.learning = None;
     }
 
-    fn transport(&mut self, ui: &mut egui::Ui, console: &[ConsoleEvent]) {
+    fn transport(&mut self, ui: &mut egui::Ui, console: &[ConsoleActivity]) {
         heading(ui, "Transport", "Console buttons that drive the DAW, and lights that follow it.");
         check_row(ui, "Transport control", &mut self.draft.transport.enabled);
 

@@ -13,11 +13,11 @@ use crate::livetrax::Daw;
 use crate::markers::{self, MarkerTable};
 use crate::osc::{self, Incoming};
 use crate::session;
-use crate::shared::{Command, CommandRx, ConsoleEvent, Cue, CueKind, Shared};
+use crate::shared::{Command, CommandRx, ConsoleActivity, Cue, CueKind, Shared};
 use crate::timecode::{self, Fps};
 use crate::patch::PatchModel;
 use crate::snapfile::SnapFile;
-use crate::wing::Wing;
+use crate::console::{Console, ConsoleEvent};
 
 /// How long a value we pushed is ignored when it comes straight back.
 const ECHO_WINDOW: Duration = Duration::from_millis(1_500);
@@ -26,7 +26,7 @@ const SCENE_LOOP_WINDOW: Duration = Duration::from_millis(1_500);
 
 pub struct Bridge {
     cfg: Config,
-    wing: Wing,
+    console: Console,
     daw: Daw,
     map: ChannelMap,
     markers: MarkerTable,
@@ -94,7 +94,7 @@ struct State {
     click: bool,
     speed: f32,
     session_end: i64,
-    console_events: Vec<ConsoleEvent>,
+    console_events: Vec<ConsoleActivity>,
     console_seq: u64,
     position: i64,
     current_scene: Option<i32>,
@@ -118,13 +118,13 @@ struct State {
 }
 
 impl Bridge {
-    pub fn new(cfg: Config, wing: Wing, daw: Daw) -> Self {
-        let map = ChannelMap::build(&cfg.map, cfg.wing.channels);
+    pub fn new(cfg: Config, console: Console, daw: Daw) -> Self {
+        let map = ChannelMap::build(&cfg.map, cfg.channels());
         let mut markers = MarkerTable::default();
         markers.sample_rate = Some(cfg.livetrax.sample_rate);
         let mut bridge = Self {
             cfg,
-            wing,
+            console,
             daw,
             map,
             markers,
@@ -187,7 +187,7 @@ impl Bridge {
 
     pub async fn run(
         mut self,
-        mut wing_rx: mpsc::Receiver<Incoming>,
+        mut console_rx: mpsc::Receiver<ConsoleEvent>,
         mut daw_rx: mpsc::Receiver<Incoming>,
         mut cmd_rx: CommandRx,
     ) -> Result<()> {
@@ -205,10 +205,10 @@ impl Bridge {
         let _watcher = self.spawn_session_watcher(file_tx);
 
         // Bring both ends up immediately, then keep them alive on timers.
-        self.wing.subscribe().await.ok();
+        self.console.start().await.ok();
         if self.cfg.patch.source == PatchSource::Console && self.cfg.patch.query_on_start {
             // Names first: the patch resolver uses them.
-            self.wing.query_all_names().await.ok();
+            self.console.query_all_names(self.cfg.channels()).await.ok();
             if let Err(e) = self.start_live_query(None).await {
                 tracing::warn!("patch query: {e:#}");
             }
@@ -216,25 +216,25 @@ impl Bridge {
         self.daw.set_surface().await.ok();
         self.daw.request_strip_list().await.ok();
         if self.cfg.names.enabled {
-            self.wing.query_all_names().await.ok();
+            self.console.query_all_names(self.cfg.channels()).await.ok();
         }
 
-        let mut subscribe = tokio::time::interval(Duration::from_millis(
-            self.cfg.wing.subscribe_interval_ms.max(500),
-        ));
+        // A WING wants its subscription renewed; a Qu hangs up without an
+        // Active Sense. Same timer, different reason.
+        let mut keepalive = tokio::time::interval(self.console.keepalive_interval(&self.cfg));
         let mut refresh = tokio::time::interval(Duration::from_millis(
             self.cfg.livetrax.refresh_interval_ms.max(1_000),
         ));
-        let poll_ms = self.cfg.wing.name_poll_interval_ms;
+        let poll_ms = self.cfg.name_poll_interval_ms();
         let names_on = self.cfg.names.enabled;
         let mut name_poll = tokio::time::interval(Duration::from_millis(poll_ms.max(1_000)));
         let mut flush = tokio::time::interval(Duration::from_millis(50));
 
         loop {
             tokio::select! {
-                Some(inc) = wing_rx.recv() => {
-                    if let Err(e) = self.on_wing(inc).await {
-                        tracing::warn!("wing event: {e:#}");
+                Some(event) = console_rx.recv() => {
+                    if let Err(e) = self.on_console(event).await {
+                        tracing::warn!("console event: {e:#}");
                     }
                 }
                 Some(inc) = daw_rx.recv() => {
@@ -250,13 +250,13 @@ impl Bridge {
                         tracing::warn!("command: {e:#}");
                     }
                 }
-                _ = subscribe.tick() => { self.wing.subscribe().await.ok(); }
+                _ = keepalive.tick() => { self.console.keepalive().await.ok(); }
                 _ = refresh.tick() => {
                     self.daw.set_surface().await.ok();
                     self.daw.request_strip_list().await.ok();
                 }
                 _ = name_poll.tick(), if poll_ms > 0 && names_on => {
-                    self.wing.query_all_names().await.ok();
+                    self.console.query_all_names(self.cfg.channels()).await.ok();
                 }
                 _ = flush.tick() => {
                     if let Err(e) = self.flush_names().await {
@@ -278,100 +278,113 @@ impl Bridge {
 
     // ------------------------------------------------------------- console --
 
-    async fn on_wing(&mut self, inc: Incoming) -> Result<()> {
+    async fn on_console(&mut self, event: ConsoleEvent) -> Result<()> {
         self.st.last_wing_rx = Some(Instant::now());
         self.st.wing_msgs += 1;
-        let addr = inc.msg.addr.as_str();
-        tracing::trace!("wing -> {}", osc::render(&inc.msg));
 
-        if let Some(ch) = self.wing.channel_of_name_address(addr) {
-            if let Some(name) = inc.msg.args.first().and_then(osc::as_str) {
-                // Names are always tracked - the GUI and session generator need
-                // them even when name sync is off or pointed the other way.
-                self.on_wing_name(ch, name.trim());
-                return Ok(());
+        match event {
+            ConsoleEvent::Name { channel, name } => {
+                // Names are always tracked - the interface and the session
+                // generator need them even when sync is off or pointed the
+                // other way.
+                self.on_wing_name(channel, name.trim());
+            }
+            ConsoleEvent::Scene { index } => {
+                if self.cfg.scenes.enabled && self.cfg.scenes.direction.scene_to_marker() {
+                    self.on_scene(index).await?;
+                }
+            }
+            ConsoleEvent::Control { id, value } => {
+                self.remember_console_event(&id, value);
+                self.on_control(&id, value).await?;
+            }
+            ConsoleEvent::Osc(msg) => {
+                let addr = msg.addr.as_str();
+                tracing::trace!("console -> {}", osc::render(&msg));
+                let value = msg.args.first().and_then(osc::as_f32).unwrap_or(1.0);
+
+                // Patch replies only matter while a query is outstanding.
+                if self.live_query.is_some()
+                    && crate::patch::absorb(&mut self.live, &self.cfg.patch.live, addr, &msg.args)
+                {
+                    return Ok(());
+                }
+
+                // Whatever is left is a control someone touched, so it is
+                // worth remembering: this is the list a binding is learned
+                // from.
+                self.remember_console_event(addr, value);
+                self.on_control(addr, value).await?;
+
+                // A WING reports its scene as a value at a configured address,
+                // rather than as a scene message of its own.
+                if self.cfg.scenes.enabled
+                    && self.cfg.scenes.direction.scene_to_marker()
+                    && addr == self.cfg.scenes.scene_address
+                {
+                    if let Some(index) = msg.args.first().and_then(osc::as_i64) {
+                        self.on_scene(index as i32).await?;
+                    }
+                }
             }
         }
+        Ok(())
+    }
 
-        let value = inc
-            .msg
-            .args
-            .first()
-            .and_then(osc::as_f32)
-            .unwrap_or(1.0);
-
-        // Patch replies only matter while a query is outstanding.
-        if self.live_query.is_some()
-            && crate::patch::absorb(&mut self.live, &self.cfg.patch.live, addr, &inc.msg.args)
-        {
+    /// A control was touched: run whatever is bound to it.
+    async fn on_control(&mut self, id: &str, value: f32) -> Result<()> {
+        if !self.cfg.transport.enabled {
             return Ok(());
         }
-
-        // Whatever is left is a control someone touched, so it is worth
-        // remembering: this is the list a binding is learned from.
-        self.remember_console_event(addr, &inc.msg.args);
-
-        if self.cfg.transport.enabled {
-            // Cloned so the borrow of self.cfg ends before the action runs.
-            let hits: Vec<Action> = self
-                .cfg
-                .transport
-                .buttons
-                .iter()
-                .filter(|b| b.address == addr && (b.threshold <= 0.0 || value >= b.threshold))
-                .map(|b| b.action.clone())
-                .collect();
-            for action in hits {
-                tracing::info!("wing {addr} -> {action:?}");
-                self.run_action(&action).await?;
-            }
-
-            let arms: Vec<RecArmMap> = self
-                .cfg
-                .transport
-                .rec_arm
-                .iter()
-                .filter(|r| r.address == addr)
-                .cloned()
-                .collect();
-            for arm in arms {
-                let ssid = if arm.strip > 0 {
-                    arm.strip
-                } else {
-                    self.map.strip(arm.channel).unwrap_or(0)
-                };
-                if ssid == 0 {
-                    tracing::warn!("rec_arm {addr}: no strip for channel {}", arm.channel);
-                    continue;
-                }
-                let on = if arm.follow_value { value >= arm.threshold } else { true };
-                tracing::info!("wing {addr} -> strip {ssid} rec {}", on as i32);
-                self.daw.rec_enable_strip(ssid, on).await?;
-            }
+        // Cloned so the borrow of self.cfg ends before the action runs.
+        let hits: Vec<Action> = self
+            .cfg
+            .transport
+            .buttons
+            .iter()
+            .filter(|b| b.address == id && (b.threshold <= 0.0 || value >= b.threshold))
+            .map(|b| b.action.clone())
+            .collect();
+        for action in hits {
+            tracing::info!("console {id} -> {action:?}");
+            self.run_action(&action).await?;
         }
 
-        if self.cfg.scenes.enabled
-            && self.cfg.scenes.direction.scene_to_marker()
-            && addr == self.cfg.scenes.scene_address
-        {
-            if let Some(idx) = inc.msg.args.first().and_then(osc::as_i64) {
-                self.on_scene(idx as i32).await?;
+        let arms: Vec<RecArmMap> = self
+            .cfg
+            .transport
+            .rec_arm
+            .iter()
+            .filter(|r| r.address == id)
+            .cloned()
+            .collect();
+        for arm in arms {
+            let ssid = if arm.strip > 0 {
+                arm.strip
+            } else {
+                self.map.strip(arm.channel).unwrap_or(0)
+            };
+            if ssid == 0 {
+                tracing::warn!("rec_arm {id}: no strip for channel {}", arm.channel);
+                continue;
             }
+            let on = if arm.follow_value { value >= arm.threshold } else { true };
+            tracing::info!("console {id} -> strip {ssid} rec {}", on as i32);
+            self.daw.rec_enable_strip(ssid, on).await?;
         }
         Ok(())
     }
 
     /// Keep the last few console controls that were touched. Channel names and
     /// patch replies are excluded - this is the list you pick a button from.
-    fn remember_console_event(&mut self, addr: &str, args: &[OscType]) {
-        let value = args.first().and_then(osc::as_f32).unwrap_or(1.0);
+    fn remember_console_event(&mut self, addr: &str, value: f32) {
         self.st.console_seq += 1;
         let seq = self.st.console_seq;
         if let Some(existing) = self.st.console_events.iter_mut().find(|e| e.address == addr) {
             existing.seq = seq;
             existing.value = value;
         } else {
-            self.st.console_events.push(ConsoleEvent {
+            self.st.console_events.push(ConsoleActivity {
                 seq,
                 address: addr.to_string(),
                 value,
@@ -650,7 +663,7 @@ impl Bridge {
         tracing::info!("marker \"{name}\" -> scene {}", entry.scene);
         self.st.current_scene = Some(entry.scene);
         self.st.scene_echo = Some((entry.scene, Instant::now()));
-        self.wing
+        self.console
             .recall_scene(&self.cfg.scenes.recall_address, entry.scene)
             .await?;
         Ok(())
@@ -690,8 +703,8 @@ impl Bridge {
                 LedSource::PunchOut => self.st.punch_out,
                 LedSource::Click => self.st.click,
             };
-            let arg = if on { led.on.to_osc() } else { led.off.to_osc() };
-            self.wing.send_raw(&led.address, vec![arg]).await?;
+            let arg = if on { &led.on } else { &led.off };
+            self.console.send_control(&led.address, arg).await?;
         }
         Ok(())
     }
@@ -783,7 +796,7 @@ impl Bridge {
         for (ch, name) in ready {
             self.st.pending_wing.remove(&ch);
             tracing::info!("name -> ch{ch}: \"{name}\"");
-            self.wing.set_name(ch, &name).await?;
+            self.console.set_name(ch, &name).await?;
             self.st.sent_wing.insert(ch, (name, Instant::now()));
         }
         Ok(())
@@ -927,10 +940,16 @@ impl Bridge {
     /// Ask the console for its patch. Replies land in `self.live`.
     async fn start_live_query(&mut self, group: Option<String>) -> Result<()> {
         let group = group.unwrap_or_else(|| self.cfg.patch.output_group.clone());
+        let Some(wing) = self.console.wing().cloned() else {
+            tracing::warn!(
+                "reading the output patch live is a WING conversation; a Qu has no \
+                 equivalent, so the channel map comes from [map]"
+            );
+            return Ok(());
+        };
         self.live = PatchModel::default();
-        let asked = self
-            .wing
-            .query_patch(&self.cfg.patch.live, &group, self.cfg.wing.channels)
+        let asked = wing
+            .query_patch(&self.cfg.patch.live, &group, self.cfg.channels())
             .await?;
         tracing::info!("asked the console about output group {group} ({asked} queries)");
         self.live_query = Some(LiveQuery {
@@ -964,10 +983,8 @@ impl Bridge {
         if phase == 1 {
             let wanted = self.live.unclaimed_sockets(&group);
             if !wanted.is_empty() {
-                let more = self
-                    .wing
-                    .query_input_names(&self.cfg.patch.live, &wanted)
-                    .await?;
+                let Some(wing) = self.console.wing().cloned() else { return Ok(()) };
+                let more = wing.query_input_names(&self.cfg.patch.live, &wanted).await?;
                 self.live_query = Some(LiveQuery {
                     group,
                     phase: 2,
@@ -992,7 +1009,7 @@ impl Bridge {
                  [patch.live] addresses with `probe`, or use a .snap file instead."
             );
             self.patch = None;
-            self.map = ChannelMap::build(&self.cfg.map, self.cfg.wing.channels);
+            self.map = ChannelMap::build(&self.cfg.map, self.cfg.channels());
             self.publish();
             return;
         }
@@ -1017,7 +1034,7 @@ impl Bridge {
     async fn on_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::QueryWingNames => {
-                self.wing.query_all_names().await?;
+                self.console.query_all_names(self.cfg.channels()).await?;
             }
             Command::RefreshDaw => {
                 self.daw.set_surface().await?;
@@ -1049,7 +1066,7 @@ impl Bridge {
                         continue;
                     }
                     let target = self.truncate_for_wing(&name);
-                    self.wing.set_name(ch, &target).await?;
+                    self.console.set_name(ch, &target).await?;
                     self.st.sent_wing.insert(ch, (target, Instant::now()));
                     count += 1;
                 }
@@ -1058,7 +1075,7 @@ impl Bridge {
             Command::Transport(action) => self.run_action(&action).await?,
             Command::RecallScene(idx) => {
                 self.st.scene_echo = Some((idx, Instant::now()));
-                self.wing
+                self.console
                     .recall_scene(&self.cfg.scenes.recall_address, idx)
                     .await?;
             }
@@ -1104,7 +1121,7 @@ impl Bridge {
             Command::ApplyChannelNames(entries) => {
                 let count = entries.len();
                 for (ch, name) in entries {
-                    self.wing.set_name(ch, &name).await?;
+                    self.console.set_name(ch, &name).await?;
                     self.st.sent_wing.insert(ch, (name, Instant::now()));
                 }
                 tracing::info!("applied {count} names to the console");
@@ -1124,7 +1141,7 @@ impl Bridge {
                 }
                 self.load_patch();
                 if self.cfg.patch.snap_file.is_none() || !self.cfg.patch.use_for_map {
-                    self.map = ChannelMap::build(&self.cfg.map, self.cfg.wing.channels);
+                    self.map = ChannelMap::build(&self.cfg.map, self.cfg.channels());
                     tracing::info!("channel map back to [map]: {} pairs", self.map.len());
                 }
             }
@@ -1184,7 +1201,7 @@ impl Bridge {
         let session_changed = new.livetrax.session_file != self.cfg.livetrax.session_file;
 
         self.cfg = new;
-        self.map = ChannelMap::build(&self.cfg.map, self.cfg.wing.channels);
+        self.map = ChannelMap::build(&self.cfg.map, self.cfg.channels());
         self.load_patch();
         if session_changed {
             self.load_session_markers();
@@ -1250,10 +1267,10 @@ impl Bridge {
         s.names_enabled = self.cfg.names.enabled;
         s.names_direction = self.cfg.names.direction;
         s.scenes_enabled = self.cfg.scenes.enabled;
-        s.wing_target = self.wing.link.remote().to_string();
+        s.wing_target = self.console.target();
         s.daw_target = self.daw.link.remote().to_string();
         s.session_file = self.cfg.livetrax.session_file.clone();
-        s.channels = self.cfg.wing.channels;
+        s.channels = self.cfg.channels();
         s.patch_summary = self.patch.as_ref().map(PatchInfo::summary);
         s.patch_group = self.patch.as_ref().map(|p| p.group.clone());
         s.patch_source = self.patch.as_ref().map(|p| p.source.clone());
@@ -1380,6 +1397,7 @@ pub async fn dump_strips(daw: &Daw, rx: &mut mpsc::Receiver<Incoming>, secs: u64
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::wing::Wing;
     use rosc::OscType;
     use std::net::UdpSocket as StdUdp;
 
@@ -1420,7 +1438,7 @@ max_len_wing = 6
             .unwrap();
         let bridge = Bridge::new(
             cfg.clone(),
-            Wing::new(wing_link, cfg.wing.clone()),
+            Console::Wing(Wing::new(wing_link, cfg.wing.clone())),
             Daw::new(daw_link, cfg.livetrax.clone()),
         );
         (bridge, wing_peer, daw_peer)
@@ -1626,16 +1644,10 @@ max_len_wing = 6
     #[tokio::test]
     async fn console_controls_are_remembered_for_learning() {
         let (mut bridge, _wing, _daw) = harness().await;
-        let press = |addr: &str, value: f32| Incoming {
-            from: "127.0.0.1:1".parse().unwrap(),
-            msg: rosc::OscMessage {
-                addr: addr.into(),
-                args: vec![OscType::Float(value)],
-            },
-        };
-        bridge.on_wing(press("/$ctl/user/1/bu/7", 1.0)).await.unwrap();
-        bridge.on_wing(press("/$ctl/user/1/bu/7", 0.0)).await.unwrap();
-        bridge.on_wing(press("/$ctl/user/1/bu/8", 1.0)).await.unwrap();
+        let press = |id: &str, value: f32| ConsoleEvent::Control { id: id.into(), value };
+        bridge.on_console(press("/$ctl/user/1/bu/7", 1.0)).await.unwrap();
+        bridge.on_console(press("/$ctl/user/1/bu/7", 0.0)).await.unwrap();
+        bridge.on_console(press("/$ctl/user/1/bu/8", 1.0)).await.unwrap();
 
         let events = &bridge.st.console_events;
         assert_eq!(events.len(), 2, "one entry per control, not per message");
@@ -1646,16 +1658,11 @@ max_len_wing = 6
 
         // A channel name is not a control and must not clutter the list.
         bridge
-            .on_wing(Incoming {
-                from: "127.0.0.1:1".parse().unwrap(),
-                msg: rosc::OscMessage {
-                    addr: "/ch/1/name".into(),
-                    args: vec![OscType::String("KICK".into())],
-                },
-            })
+            .on_console(ConsoleEvent::Name { channel: 1, name: "KICK".into() })
             .await
             .unwrap();
         assert_eq!(bridge.st.console_events.len(), 2);
+        assert_eq!(bridge.st.wing_names.get(&1).map(String::as_str), Some("KICK"));
     }
 
     #[tokio::test]
